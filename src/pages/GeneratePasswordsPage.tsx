@@ -22,6 +22,9 @@ function generateBatchPasswords(count: number, mode: PasswordMode): GeneratedPas
 const COUNT_PRESETS = [5, 10, 25, 50, 100];
 const MIN_COUNT = 1;
 const MAX_COUNT = 1000;
+// The slider covers the common range only; larger counts are typed. A 1–1000
+// linear slider would bury every useful value in the first 10% of the track.
+const SLIDER_MAX = 100;
 
 export function GeneratePasswordsPage() {
   const { showToast } = useToast();
@@ -152,7 +155,8 @@ export function GeneratePasswordsPage() {
   };
 
   const sliderFill = useMemo(
-    () => `${((count - MIN_COUNT) / (MAX_COUNT - MIN_COUNT)) * 100}%`,
+    () =>
+      `${Math.min(100, ((count - MIN_COUNT) / (SLIDER_MAX - MIN_COUNT)) * 100)}%`,
     [count]
   );
 
@@ -240,8 +244,8 @@ export function GeneratePasswordsPage() {
                     <input
                       type="range"
                       min={MIN_COUNT}
-                      max={MAX_COUNT}
-                      value={count}
+                      max={SLIDER_MAX}
+                      value={Math.min(count, SLIDER_MAX)}
                       onChange={(e) => applyCount(Number(e.target.value))}
                       className={styles.slider}
                       style={{ '--fill': sliderFill } as React.CSSProperties}
