@@ -21,6 +21,12 @@ functions/lib
 .env.*.local
 *.local
 
+# Service account keys / credentials (never commit)
+*-firebase-adminsdk-*.json
+password-portal-*.json
+*serviceaccount*.json
+*service-account*.json
+
 # Logs
 logs
 *.log
