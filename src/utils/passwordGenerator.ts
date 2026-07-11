@@ -1,6 +1,7 @@
 // Password generator using custom word lists
 // Simple: TreeBridge47 (Word + Word + 2 digits)
 // Secure: Movie3Cartoon)Bottle (Word + digit + Word + symbol + Word)
+// Word4: Tiger4829 (Word + 4 digits)
 
 // Default word lists
 const defaultWords = [
@@ -16,7 +17,7 @@ const defaultWords = [
 
 const symbols = ['!', '@', '#', '$', '%', '&', '*', ')', '+', '='];
 
-export type PasswordMode = 'simple' | 'secure';
+export type PasswordMode = 'simple' | 'secure' | 'word4';
 
 export interface GeneratedPassword {
   id: string;
@@ -58,6 +59,11 @@ function randomTwoDigits(): string {
   return (10 + secureRandom(90)).toString();
 }
 
+// Generate random four digit number (1000-9999)
+function randomFourDigits(): string {
+  return (1000 + secureRandom(9000)).toString();
+}
+
 // Generate a Simple password: Word + Word + 2 digits
 // Example: TreeBridge47
 function generateSimplePassword(words: string[]): string {
@@ -80,14 +86,32 @@ function generateSecurePassword(words: string[]): string {
   return `${word1}${digit}${word2}${symbol}${word3}`;
 }
 
+// Generate a Word4 password: Word + 4 digits
+// Example: Tiger4829
+function generateWord4Password(words: string[]): string {
+  const word = pickRandom(words);
+  const digits = randomFourDigits();
+
+  return `${word}${digits}`;
+}
+
+// Resolve the generator function for a given mode
+function getGenerator(mode: PasswordMode): (words: string[]) => string {
+  switch (mode) {
+    case 'secure':
+      return generateSecurePassword;
+    case 'word4':
+      return generateWord4Password;
+    default:
+      return generateSimplePassword;
+  }
+}
+
 // Generate a password based on mode
 export function generatePassword(options: GeneratorOptions = {}): string {
   const { words = defaultWords, mode = 'simple' } = options;
 
-  if (mode === 'secure') {
-    return generateSecurePassword(words);
-  }
-  return generateSimplePassword(words);
+  return getGenerator(mode)(words);
 }
 
 // Generate multiple password options for user to choose from
@@ -109,7 +133,7 @@ export function generateBatch(
   options: GeneratorOptions = {}
 ): GeneratedPassword[] {
   const { words = defaultWords, mode = 'simple' } = options;
-  const generator = mode === 'secure' ? generateSecurePassword : generateSimplePassword;
+  const generator = getGenerator(mode);
   const results: GeneratedPassword[] = new Array(count);
 
   for (let i = 0; i < count; i++) {

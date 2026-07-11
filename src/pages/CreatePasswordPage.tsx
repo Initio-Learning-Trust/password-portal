@@ -220,6 +220,23 @@ export function CreatePasswordPage() {
                       <span className={styles.modeExample}>Movie3Cartoon)Bottle</span>
                     </span>
                   </button>
+                  <button
+                    type="button"
+                    className={`${styles.modeBtn} ${passwordMode === 'word4' ? styles.active : ''}`}
+                    onClick={() => setPasswordMode('word4')}
+                  >
+                    <span className={styles.modeIcon}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M4 7V4h16v3" />
+                        <path d="M9 20h6" />
+                        <path d="M12 4v16" />
+                      </svg>
+                    </span>
+                    <span className={styles.modeContent}>
+                      <span className={styles.modeName}>Word + 4 digits</span>
+                      <span className={styles.modeExample}>Tiger4829</span>
+                    </span>
+                  </button>
                 </div>
 
                 {/* Generated Password Display */}

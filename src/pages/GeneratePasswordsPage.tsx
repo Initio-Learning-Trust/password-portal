@@ -178,6 +178,17 @@ export function GeneratePasswordsPage() {
                         <span className={styles.modeExample}>Movie3Cartoon)Bottle</span>
                         <span className={styles.modeDesc}>Higher entropy</span>
                       </button>
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={mode === 'word4'}
+                        className={`${styles.modeBtn} ${mode === 'word4' ? styles.modeActive : ''}`}
+                        onClick={() => setMode('word4')}
+                      >
+                        <span className={styles.modeName}>Word + 4 digits</span>
+                        <span className={styles.modeExample}>Tiger4829</span>
+                        <span className={styles.modeDesc}>Short and simple</span>
+                      </button>
                     </div>
                   </div>
                 </div>
