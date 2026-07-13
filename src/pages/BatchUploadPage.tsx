@@ -213,15 +213,26 @@ export function BatchUploadPage() {
     }
   };
 
-  const handleDownloadTemplate = () => {
-    const template = 'email,name,password,notes\nuser@example.com,John Smith,,Optional notes\n';
-    const blob = new Blob([template], { type: 'text/csv' });
+  // Trigger a CSV download. The anchor must be in the DOM for the click to
+  // fire in some browsers, and the object URL must not be revoked until after
+  // the download has started (hence the deferred revoke).
+  const downloadCsv = (filename: string, content: string) => {
+    const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'password-batch-template.csv';
+    a.download = filename;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const handleDownloadTemplate = () => {
+    downloadCsv(
+      'password-batch-template.csv',
+      'email,name,password,notes\nuser@example.com,John Smith,,Optional notes\n'
+    );
   };
 
   const handleDownloadResults = () => {
@@ -231,14 +242,7 @@ export function BatchUploadPage() {
         (r) => `${r.email},${r.success},${r.link || ''},${r.error || ''}`
       ),
     ].join('\n');
-
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'password-batch-results.csv';
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadCsv('password-batch-results.csv', csv);
   };
 
   const handleReset = () => {
