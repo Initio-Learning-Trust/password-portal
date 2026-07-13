@@ -10,10 +10,17 @@
   text-underline-offset: 3px;
 }
 
-.popover {
+/* Wrapper owns positioning (fixed + centering translate) so framer-motion's
+   own transform on the inner element can't clobber it. */
+.popoverWrap {
   position: fixed;
-  z-index: 1000;
+  z-index: 2147483000;
   transform: translate(-50%, -100%);
+  pointer-events: none;
+}
+
+.popover {
+  position: relative;
   width: max-content;
   max-width: 260px;
   padding: 0.7rem 0.85rem;
@@ -21,7 +28,6 @@
   color: white;
   border-radius: 10px;
   box-shadow: 0 12px 32px rgba(15, 30, 40, 0.35);
-  pointer-events: none;
 }
 
 .arrow {

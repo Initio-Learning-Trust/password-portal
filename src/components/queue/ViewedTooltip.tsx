@@ -79,29 +79,34 @@ export function ViewedTooltip({
       {createPortal(
         <AnimatePresence>
           {coords && (
-            <motion.div
-              className={styles.popover}
+            <div
+              key="viewed-tooltip"
+              className={styles.popoverWrap}
               style={{ left: coords.x, top: coords.y }}
-              initial={{ opacity: 0, y: 4, scale: 0.94 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 4, scale: 0.94 }}
-              transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
-              role="tooltip"
             >
-              <div className={styles.head}>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-                  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
-                  <circle cx="12" cy="12" r="3" />
-                </svg>
-                Opened by recipient
-              </div>
-              <div className={styles.date}>{formatFull(date)}</div>
-              <div className={styles.relative}>{formatRelative(date)}</div>
-              {viewedFromIP && viewedFromIP !== 'unknown' && (
-                <div className={styles.ip}>from {viewedFromIP}</div>
-              )}
-              <span className={styles.arrow} />
-            </motion.div>
+              <motion.div
+                className={styles.popover}
+                initial={{ opacity: 0, y: 4, scale: 0.94 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 4, scale: 0.94 }}
+                transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+                role="tooltip"
+              >
+                <div className={styles.head}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                  Opened by recipient
+                </div>
+                <div className={styles.date}>{formatFull(date)}</div>
+                <div className={styles.relative}>{formatRelative(date)}</div>
+                {viewedFromIP && viewedFromIP !== 'unknown' && (
+                  <div className={styles.ip}>from {viewedFromIP}</div>
+                )}
+                <span className={styles.arrow} />
+              </motion.div>
+            </div>
           )}
         </AnimatePresence>,
         document.body
