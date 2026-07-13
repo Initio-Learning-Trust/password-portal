@@ -24,6 +24,7 @@ import { normalizeSearchQuery } from '../utils/searchTokens';
 import { Layout } from '../components/layout/Layout';
 import { Button } from '../components/common/Button';
 import { BatchGroupRow } from '../components/queue/BatchGroupRow';
+import { ViewedTooltip } from '../components/queue/ViewedTooltip';
 import type { BatchDoc, PasswordDoc } from '../types';
 import styles from './QueuePage.module.css';
 
@@ -733,15 +734,26 @@ export function QueuePage() {
         </div>
       </td>
       <td>
-        <span className={`${styles.statusBadge} ${styles[`status-${password.status}`]}`}>
-          {password.status === 'pending' && !password.emailSent && (
-            <span className={styles.statusDot} />
-          )}
-          {password.status}
-          {password.status === 'viewed' && password.viewedAt && (
-            <span className={styles.statusMeta}>{formatDate(password.viewedAt)}</span>
-          )}
-        </span>
+        {password.status === 'viewed' && password.viewedAt ? (
+          <ViewedTooltip viewedAt={password.viewedAt} viewedFromIP={password.viewedFromIP}>
+            <span
+              className={`${styles.statusBadge} ${styles['status-viewed']} viewedInteractive`}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+              viewed
+            </span>
+          </ViewedTooltip>
+        ) : (
+          <span className={`${styles.statusBadge} ${styles[`status-${password.status}`]}`}>
+            {password.status === 'pending' && !password.emailSent && (
+              <span className={styles.statusDot} />
+            )}
+            {password.status}
+          </span>
+        )}
         {password.status === 'failed' && password.lastError && (
           <span className={styles.errorText} title={password.lastError}>
             {password.lastError}
