@@ -50,6 +50,15 @@ service cloud.firestore {
       // Note: Password viewing by end users is handled by Cloud Functions
     }
 
+    // Batches collection — groups of password links created together.
+    // Technicians read (for the queue) and write (client-side count updates on
+    // revoke/delete + creating the batch doc on upload). Cloud Functions
+    // maintain send-progress and most counters via the Admin SDK.
+    match /batches/{batchId} {
+      allow read, create, update: if isTechnician();
+      allow delete: if isAdmin();
+    }
+
     // API Keys collection - Admin only
     match /api_keys/{keyId} {
       allow read, write: if isAdmin();

@@ -1,0 +1,140 @@
+.batchRow {
+  background: var(--color-bg-subtle);
+  box-shadow: inset 3px 0 0 var(--color-aqua);
+  cursor: pointer;
+}
+
+.batchRow:hover {
+  background: var(--color-pale-bg);
+}
+
+.identity {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  min-width: 0;
+}
+
+.chevron {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  transition: transform 0.18s ease;
+}
+
+.chevronOpen {
+  transform: rotate(90deg);
+}
+
+.icon {
+  flex-shrink: 0;
+  color: var(--color-deep-blue);
+}
+
+.nameWrap {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.name {
+  font-weight: 700;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.size {
+  margin-left: 0.4rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+}
+
+.creator {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.statusCell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 180px;
+}
+
+.countLine {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.failedCount {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.primaryBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-deep-blue);
+  background: var(--color-deep-blue);
+  color: var(--color-aqua);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.primaryBtn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.primaryBtn:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.retryBtn {
+  border-color: #dc2626;
+  background: #dc2626;
+  color: white;
+}
+
+.sending {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-deep-blue);
+  white-space: nowrap;
+}
+
+.done {
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+.spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(40, 62, 73, 0.25);
+  border-top-color: var(--color-deep-blue);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

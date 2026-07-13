@@ -32,14 +32,101 @@ interface PasswordDoc {
   createdBy: string;
   createdByEmail: string;
   createdAt: admin.firestore.Timestamp;
-  status: 'pending' | 'sent' | 'viewed' | 'expired' | 'revoked';
+  status: 'pending' | 'sent' | 'viewed' | 'expired' | 'revoked' | 'failed';
   viewedAt?: admin.firestore.Timestamp;
   viewedFromIP?: string;
   emailSent: boolean;
   emailSentAt?: admin.firestore.Timestamp;
   source: 'dashboard' | 'api' | 'batch';
   apiKeyId?: string;
+  batchId?: string;
+  lastError?: string;
   searchTokens?: string[];
+}
+
+// Statuses tracked as counters on a batch document.
+type BatchCountStatus = 'pending' | 'sent' | 'viewed' | 'failed' | 'expired' | 'revoked';
+
+// Adjust a batch's denormalized status counters. Best-effort: a counting error
+// must never break the underlying password operation, so callers swallow throws.
+// `from`/`to` are status buckets; pass null to skip that side of the move.
+async function adjustBatchCounts(
+  batchId: string | undefined,
+  from: BatchCountStatus | null,
+  to: BatchCountStatus | null
+): Promise<void> {
+  if (!batchId || from === to) return;
+  const updates: Record<string, admin.firestore.FieldValue> = {};
+  if (from) updates[`counts.${from}`] = admin.firestore.FieldValue.increment(-1);
+  if (to) updates[`counts.${to}`] = admin.firestore.FieldValue.increment(1);
+  if (Object.keys(updates).length === 0) return;
+  try {
+    await db.collection('batches').doc(batchId).update(updates);
+  } catch (err) {
+    console.error(`Failed to adjust batch counts for ${batchId}:`, err);
+  }
+}
+
+// ==================== Email helpers ====================
+
+interface RenderedEmail {
+  subject: string;
+  html: string;
+  text: string;
+}
+
+// Load the default email template from Firestore, falling back to the built-in
+// defaults for any missing field.
+async function loadEmailTemplate(): Promise<{ subject: string; htmlBody: string; textBody: string }> {
+  const templateDoc = await db.collection('email_templates').doc('default').get();
+  let subject = 'Your New Password - {{recipientName}}';
+  let htmlBody = getDefaultHtmlTemplate();
+  let textBody = getDefaultTextTemplate();
+  if (templateDoc.exists) {
+    const t = templateDoc.data();
+    if (t) {
+      subject = t.subject || subject;
+      htmlBody = t.htmlBody || htmlBody;
+      textBody = t.textBody || textBody;
+    }
+  }
+  return { subject, htmlBody, textBody };
+}
+
+// Substitute the template variables for one recipient.
+function renderEmail(
+  template: { subject: string; htmlBody: string; textBody: string },
+  recipientEmail: string,
+  recipientName: string | undefined,
+  link: string
+): RenderedEmail {
+  const name = recipientName || recipientEmail.split('@')[0];
+  const sub = (s: string) =>
+    s
+      .replace(/{{recipientName}}/g, name)
+      .replace(/{{recipientEmail}}/g, recipientEmail)
+      .replace(/{{link}}/g, link);
+  return {
+    subject: sub(template.subject),
+    html: sub(template.htmlBody),
+    text: sub(template.textBody),
+  };
+}
+
+// Classify a nodemailer/SMTP error as transient (worth retrying) vs permanent.
+// Gmail defers with 4xx codes (421 "too many connections", 454 rate limit) and
+// connection errors are transient; 5xx (bad mailbox) is permanent.
+function isTransientMailError(err: unknown): boolean {
+  const e = err as { responseCode?: number; code?: string };
+  if (typeof e?.responseCode === 'number') {
+    return e.responseCode >= 400 && e.responseCode < 500;
+  }
+  const transientCodes = ['ETIMEDOUT', 'ECONNECTION', 'ESOCKET', 'ECONNRESET', 'EDNS', 'EAI_AGAIN'];
+  return !!e?.code && transientCodes.includes(e.code);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -53,7 +140,7 @@ export const createPasswordLink = onCall(
       throw new HttpsError('unauthenticated', 'Must be logged in');
     }
 
-    const { recipientEmail, recipientName, password, notes, sendNotification } = request.data;
+    const { recipientEmail, recipientName, password, notes, sendNotification, batchId } = request.data;
 
     // Validate input
     if (!recipientEmail || !password) {
@@ -90,8 +177,9 @@ export const createPasswordLink = onCall(
         createdAt: admin.firestore.Timestamp.now(),
         status: 'pending',
         emailSent: false,
-        source: 'dashboard',
+        source: batchId ? 'batch' : 'dashboard',
         searchTokens: buildSearchTokens(recipientEmail, recipientName),
+        ...(batchId ? { batchId } : {}),
       };
 
       await db.collection('passwords').doc(linkId).set(passwordDoc);
@@ -167,6 +255,7 @@ export const createPasswordLink = onCall(
             emailSent: true,
             emailSentAt: admin.firestore.Timestamp.now(),
           });
+          await adjustBatchCounts(batchId, 'pending', 'sent');
         } catch (emailError) {
           console.error('Failed to send email on creation:', emailError);
           // Don't fail the whole operation, just log - email can be resent from queue
@@ -276,8 +365,18 @@ export const viewPassword = onCall(
         return {
           password,
           recipientName: data.recipientName,
+          batchId: data.batchId,
+          priorStatus: data.status,
         };
       });
+
+      // Keep batch counters in sync: the link moved out of its prior bucket
+      // (pending or sent) into viewed.
+      await adjustBatchCounts(
+        result.batchId,
+        result.priorStatus === 'sent' ? 'sent' : 'pending',
+        'viewed'
+      );
 
       // Create audit log (outside transaction)
       await db.collection('audit_logs').add({
@@ -288,7 +387,8 @@ export const viewPassword = onCall(
         timestamp: admin.firestore.Timestamp.now(),
       });
 
-      return result;
+      // Only expose the fields the viewer needs — not internal batch metadata.
+      return { password: result.password, recipientName: result.recipientName };
     } catch (error) {
       console.error('Error viewing password:', error);
       if (error instanceof HttpsError) throw error;
@@ -757,6 +857,7 @@ export const sendPasswordEmail = onCall(
       const passwordData = passwordDoc.data() as PasswordDoc;
       const recipientEmail = passwordData.recipientEmail;
       const recipientName = passwordData.recipientName || '';
+      const priorStatus = passwordData.status;
       const link = `${appUrl.value()}/p/${passwordId}`;
       console.log('Sending to:', recipientEmail, 'Link:', link);
 
@@ -815,7 +916,19 @@ export const sendPasswordEmail = onCall(
         status: 'sent',
         emailSent: true,
         emailSentAt: admin.firestore.Timestamp.now(),
+        lastError: admin.firestore.FieldValue.delete(),
       });
+
+      // Keep batch counters in sync when resending a batch member. A resend of
+      // an already-sent link doesn't move buckets; a first send from
+      // pending/failed does.
+      if (priorStatus !== 'sent' && priorStatus !== 'viewed') {
+        await adjustBatchCounts(
+          passwordData.batchId,
+          priorStatus === 'failed' ? 'failed' : 'pending',
+          'sent'
+        );
+      }
 
       // Create audit log
       await db.collection('audit_logs').add({
@@ -839,6 +952,195 @@ export const sendPasswordEmail = onCall(
       if (error instanceof HttpsError) throw error;
       throw new HttpsError('internal', `Failed to send email: ${err.message}`);
     }
+  }
+);
+
+/**
+ * Send every not-yet-delivered email in a batch, durably and throttled.
+ *
+ * Runs entirely server-side so closing the tab can't abort it. Uses ONE pooled
+ * SMTP connection with a send-rate cap, retries transient Gmail deferrals
+ * (421/454) with exponential backoff, and records per-recipient success/failure
+ * on each password doc (`status: 'failed'` + `lastError`). A single failure
+ * never aborts the rest of the batch. Progress is written to the batch's
+ * `sendJob` so the queue UI can show it live. Re-running picks up whatever is
+ * still pending/failed, so it's safely resumable.
+ */
+export const sendBatchEmails = onCall(
+  {
+    region: 'europe-west2',
+    secrets: [smtpUser, smtpPass],
+    invoker: 'public',
+    timeoutSeconds: 540,
+    memory: '512MiB',
+  },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError('unauthenticated', 'Must be logged in');
+    }
+
+    const { batchId, mode } = request.data as {
+      batchId?: string;
+      mode?: 'remaining' | 'failed';
+    };
+    if (!batchId) {
+      throw new HttpsError('invalid-argument', 'batchId is required');
+    }
+
+    const userDoc = await db.collection('users').doc(request.auth.uid).get();
+    if (!userDoc.exists || !['admin', 'technician'].includes(userDoc.data()?.role)) {
+      throw new HttpsError('permission-denied', 'Insufficient permissions');
+    }
+
+    const batchRef = db.collection('batches').doc(batchId);
+    const batchSnap = await batchRef.get();
+    if (!batchSnap.exists) {
+      throw new HttpsError('not-found', 'Batch not found');
+    }
+
+    // Which links to send: failed-only (retry) or everything not yet delivered.
+    const statuses = mode === 'failed' ? ['failed'] : ['pending', 'failed'];
+    const membersSnap = await db
+      .collection('passwords')
+      .where('batchId', '==', batchId)
+      .where('status', 'in', statuses)
+      .get();
+    const members = membersSnap.docs;
+    const total = members.length;
+
+    if (total === 0) {
+      return { total: 0, sent: 0, failed: 0 };
+    }
+
+    // Mark the job running so the UI shows live progress immediately.
+    await batchRef.update({
+      sendJob: {
+        state: 'running',
+        total,
+        sent: 0,
+        failed: 0,
+        startedAt: admin.firestore.Timestamp.now(),
+        requestedBy: request.auth.uid,
+      },
+    });
+
+    const template = await loadEmailTemplate();
+
+    // ONE pooled connection with a send-rate cap — the opposite of the old
+    // "new SMTP connection per email as fast as possible" that Gmail throttled.
+    const transporter = nodemailer.createTransport({
+      host: smtpHost.value(),
+      port: parseInt(smtpPort.value(), 10),
+      secure: false,
+      auth: { user: smtpUser.value(), pass: smtpPass.value() },
+      pool: true,
+      maxConnections: 3,
+      maxMessages: 100,
+      rateDelta: 1000,
+      rateLimit: 5, // at most 5 messages/sec across the pool
+    });
+
+    const batchCounts = (batchSnap.data()?.counts || {}) as Record<string, number>;
+    let cPending = batchCounts.pending || 0;
+    let cSent = batchCounts.sent || 0;
+    let cFailed = batchCounts.failed || 0;
+    let sent = 0;
+    let failed = 0;
+    let processed = 0;
+    let lastFlush = 0;
+
+    // Flush progress to Firestore at most once per 10 messages (and on demand)
+    // to avoid hammering the single batch doc, which would hit write contention.
+    const flush = async (force: boolean) => {
+      if (!force && processed - lastFlush < 10) return;
+      lastFlush = processed;
+      await batchRef.update({
+        'counts.pending': cPending,
+        'counts.sent': cSent,
+        'counts.failed': cFailed,
+        'sendJob.sent': sent,
+        'sendJob.failed': failed,
+      });
+    };
+
+    try {
+      for (const docSnap of members) {
+        const data = docSnap.data() as PasswordDoc;
+        const wasFailed = data.status === 'failed';
+        const link = `${appUrl.value()}/p/${docSnap.id}`;
+        const email = renderEmail(template, data.recipientEmail, data.recipientName, link);
+
+        let success = false;
+        let lastErr = '';
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await transporter.sendMail({
+              from: `"Password Portal" <${smtpUser.value()}>`,
+              to: data.recipientEmail,
+              subject: email.subject,
+              text: email.text,
+              html: email.html,
+            });
+            success = true;
+            break;
+          } catch (err) {
+            lastErr = (err as Error).message || 'Send failed';
+            // Give up early on permanent errors (bad mailbox etc.); back off and
+            // retry on transient deferrals.
+            if (!isTransientMailError(err) || attempt === 2) break;
+            await sleep(2000 * Math.pow(2, attempt)); // 2s, then 4s
+          }
+        }
+
+        if (success) {
+          await docSnap.ref.update({
+            status: 'sent',
+            emailSent: true,
+            emailSentAt: admin.firestore.Timestamp.now(),
+            lastError: admin.firestore.FieldValue.delete(),
+          });
+          if (wasFailed) cFailed = Math.max(0, cFailed - 1);
+          else cPending = Math.max(0, cPending - 1);
+          cSent += 1;
+          sent += 1;
+        } else {
+          await docSnap.ref.update({ status: 'failed', lastError: lastErr });
+          if (!wasFailed) {
+            cPending = Math.max(0, cPending - 1);
+            cFailed += 1;
+          }
+          failed += 1;
+        }
+
+        processed += 1;
+        await flush(false);
+        // Base pacing between messages, on top of the pool's rate limit.
+        await sleep(150);
+      }
+    } finally {
+      transporter.close();
+      await batchRef.update({
+        'counts.pending': cPending,
+        'counts.sent': cSent,
+        'counts.failed': cFailed,
+        'sendJob.sent': sent,
+        'sendJob.failed': failed,
+        'sendJob.state': 'done',
+        'sendJob.finishedAt': admin.firestore.Timestamp.now(),
+      });
+    }
+
+    await db.collection('audit_logs').add({
+      action: 'send_email',
+      actorId: request.auth.uid,
+      actorEmail: userDoc.data()?.email,
+      targetId: batchId,
+      details: { batch: true, total, sent, failed },
+      ip: request.rawRequest?.ip || 'unknown',
+      timestamp: admin.firestore.Timestamp.now(),
+    });
+
+    return { total, sent, failed };
   }
 );
 

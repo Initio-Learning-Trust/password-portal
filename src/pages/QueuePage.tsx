@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   collection,
@@ -11,6 +11,7 @@ import {
   doc,
   updateDoc,
   deleteDoc,
+  increment,
   limit,
 } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
@@ -18,13 +19,31 @@ import { db, functions } from '../services/firebase';
 import { useAuth } from '../hooks/useAuth';
 import { useToast } from '../components/common/Toast';
 import { useDelayedLoading } from '../hooks/useDelayedLoading';
+import { useBatches } from '../hooks/useBatches';
 import { normalizeSearchQuery } from '../utils/searchTokens';
 import { Layout } from '../components/layout/Layout';
 import { Button } from '../components/common/Button';
-import type { PasswordDoc } from '../types';
+import { BatchGroupRow } from '../components/queue/BatchGroupRow';
+import type { BatchDoc, PasswordDoc } from '../types';
 import styles from './QueuePage.module.css';
 
-type FilterStatus = 'all' | 'pending' | 'sent' | 'viewed' | 'expired' | 'revoked';
+type FilterStatus = 'all' | 'pending' | 'sent' | 'viewed' | 'failed' | 'closed';
+
+// Convert a Firestore Timestamp | Date | plain object to millis for sorting the
+// mixed stream of batches and single links.
+function toMillis(value: unknown): number {
+  if (!value) return 0;
+  const v = value as { toMillis?: () => number; getTime?: () => number; seconds?: number };
+  if (typeof v.toMillis === 'function') return v.toMillis();
+  if (value instanceof Date) return value.getTime();
+  if (typeof v.seconds === 'number') return v.seconds * 1000;
+  return 0;
+}
+
+// A row in the queue is either a batch group or a standalone link.
+type StreamItem =
+  | { kind: 'batch'; id: string; createdAt: unknown; batch: BatchDoc }
+  | { kind: 'single'; id: string; createdAt: unknown; password: PasswordDoc };
 
 // Cap for the baseline "most recent" query that powers the stat counters and
 // the default view. When the user searches, we issue a separate array-contains
@@ -130,6 +149,8 @@ export function QueuePage() {
   const { user } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { batches } = useBatches();
   const [allPasswords, setAllPasswords] = useState<PasswordDoc[]>([]);
   const [searchResults, setSearchResults] = useState<PasswordDoc[] | null>(null);
   const [statCounts, setStatCounts] = useState({
@@ -137,9 +158,14 @@ export function QueuePage() {
     pending: 0,
     sent: 0,
     viewed: 0,
+    failed: 0,
     expired: 0,
     revoked: 0,
   });
+  // Which batch groups are expanded, and which have a send request in flight
+  // (before the batch doc's sendJob flips to "running").
+  const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
+  const [batchSending, setBatchSending] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const showSkeleton = useDelayedLoading(loading);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -262,6 +288,21 @@ export function QueuePage() {
     setPageIndex(0);
   }, [filterStatus, debouncedSearchEmail, pageSize]);
 
+  // Honor the ?batch=<id> deep link from Batch Upload: expand that batch once
+  // it has loaded, then drop the param so it doesn't re-trigger.
+  const batchParamHandled = useRef(false);
+  useEffect(() => {
+    const batchParam = searchParams.get('batch');
+    if (!batchParam || batchParamHandled.current) return;
+    if (batches.some((b) => b.id === batchParam)) {
+      batchParamHandled.current = true;
+      setExpandedBatches((prev) => new Set(prev).add(batchParam));
+      const next = new URLSearchParams(searchParams);
+      next.delete('batch');
+      setSearchParams(next, { replace: true });
+    }
+  }, [batches, searchParams, setSearchParams]);
+
   const loadPasswords = async () => {
     const mySeq = ++loadSeqRef.current;
     setLoading(true);
@@ -299,7 +340,7 @@ export function QueuePage() {
   const loadStatCounts = async () => {
     try {
       const passwordsRef = collection(db, 'passwords');
-      const statuses = ['pending', 'sent', 'viewed', 'expired', 'revoked'] as const;
+      const statuses = ['pending', 'sent', 'viewed', 'failed', 'expired', 'revoked'] as const;
       const [totalSnap, ...statusSnaps] = await Promise.all([
         getCountFromServer(query(passwordsRef)),
         ...statuses.map((s) =>
@@ -311,33 +352,96 @@ export function QueuePage() {
         pending: statusSnaps[0].data().count,
         sent: statusSnaps[1].data().count,
         viewed: statusSnaps[2].data().count,
-        expired: statusSnaps[3].data().count,
-        revoked: statusSnaps[4].data().count,
+        failed: statusSnaps[3].data().count,
+        expired: statusSnaps[4].data().count,
+        revoked: statusSnaps[5].data().count,
       });
     } catch (error) {
       console.error('Error loading stat counts:', error);
     }
   };
 
-  // The source list depends on whether we have server search results. When
-  // searching, `searchResults` IS the result set (no additional text filtering
-  // needed — Firestore already matched). Status filter still applies locally.
-  const filteredPasswords = useMemo(() => {
-    const source = searchResults ?? allPasswords;
-    if (filterStatus === 'all') return source;
-    return source.filter((p) => p.status === filterStatus);
-  }, [searchResults, allPasswords, filterStatus]);
+  // In search mode we show a flat list of matching links (batch members
+  // included) — hunting for a person shouldn't be gated behind a group.
+  const isSearchMode = searchResults !== null;
 
-  const totalPages = Math.max(1, Math.ceil(filteredPasswords.length / pageSize));
-  const safePageIndex = Math.min(pageIndex, totalPages - 1);
-  const passwords = useMemo(
-    () =>
-      filteredPasswords.slice(
-        safePageIndex * pageSize,
-        (safePageIndex + 1) * pageSize
-      ),
-    [filteredPasswords, safePageIndex, pageSize]
+  const singleMatchesFilter = (status: PasswordDoc['status']) => {
+    if (filterStatus === 'all') return true;
+    if (filterStatus === 'closed') return status === 'expired' || status === 'revoked';
+    return status === filterStatus;
+  };
+
+  const batchMatchesFilter = (b: BatchDoc) => {
+    const c = b.counts || ({} as BatchDoc['counts']);
+    switch (filterStatus) {
+      case 'all':
+        return true;
+      case 'closed':
+        return (c.expired || 0) + (c.revoked || 0) > 0;
+      default:
+        return (c[filterStatus] || 0) > 0;
+    }
+  };
+
+  // Standalone links only — batch members live under their batch group.
+  const singlePasswords = useMemo(
+    () => allPasswords.filter((p) => !p.batchId),
+    [allPasswords]
   );
+
+  // Non-search: interleave batch groups and single links by creation time.
+  const streamItems = useMemo<StreamItem[]>(() => {
+    const items: StreamItem[] = [];
+    for (const b of batches) {
+      if (batchMatchesFilter(b)) {
+        items.push({ kind: 'batch', id: b.id, createdAt: b.createdAt, batch: b });
+      }
+    }
+    for (const p of singlePasswords) {
+      if (singleMatchesFilter(p.status)) {
+        items.push({ kind: 'single', id: p.id, createdAt: p.createdAt, password: p });
+      }
+    }
+    items.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batches, singlePasswords, filterStatus]);
+
+  // Search mode: flat, status-filtered results.
+  const searchFiltered = useMemo(() => {
+    if (searchResults === null) return null;
+    if (filterStatus === 'all') return searchResults;
+    return searchResults.filter((p) => singleMatchesFilter(p.status));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchResults, filterStatus]);
+
+  const activeLength = isSearchMode ? searchFiltered?.length ?? 0 : streamItems.length;
+  const totalPages = Math.max(1, Math.ceil(activeLength / pageSize));
+  const safePageIndex = Math.min(pageIndex, totalPages - 1);
+  const pageStart = safePageIndex * pageSize;
+  const pageEnd = pageStart + pageSize;
+
+  const pageStreamItems = useMemo(
+    () => streamItems.slice(pageStart, pageEnd),
+    [streamItems, pageStart, pageEnd]
+  );
+  const pageSearchResults = useMemo(
+    () => (searchFiltered ? searchFiltered.slice(pageStart, pageEnd) : []),
+    [searchFiltered, pageStart, pageEnd]
+  );
+
+  // Single-link ids visible on the current page — drives select-all.
+  const pageSingleIds = useMemo(
+    () =>
+      isSearchMode
+        ? pageSearchResults.map((p) => p.id)
+        : pageStreamItems.filter((i) => i.kind === 'single').map((i) => i.id),
+    [isSearchMode, pageSearchResults, pageStreamItems]
+  );
+
+  const isEmpty = isSearchMode
+    ? pageSearchResults.length === 0
+    : pageStreamItems.length === 0;
   const hasMore = safePageIndex < totalPages - 1;
   const hasPrev = safePageIndex > 0;
 
@@ -353,12 +457,16 @@ export function QueuePage() {
   // 500-record baseline load.
   const stats = statCounts;
 
+  const allPageSelected =
+    pageSingleIds.length > 0 && pageSingleIds.every((id) => selectedIds.has(id));
+
   const handleSelectAll = () => {
-    if (selectedIds.size === passwords.length) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(passwords.map((p) => p.id)));
-    }
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allPageSelected) pageSingleIds.forEach((id) => next.delete(id));
+      else pageSingleIds.forEach((id) => next.add(id));
+      return next;
+    });
   };
 
   const handleSelect = (id: string) => {
@@ -388,13 +496,31 @@ export function QueuePage() {
     }
   };
 
-  const handleRevoke = async (passwordId: string) => {
+  // Keep a batch's counters in sync when a member link is revoked/deleted
+  // client-side. Best-effort: a counting error never blocks the main action.
+  const adjustBatchCounts = async (
+    batchId: string | undefined,
+    changes: Record<string, ReturnType<typeof increment>>
+  ) => {
+    if (!batchId) return;
+    try {
+      await updateDoc(doc(db, 'batches', batchId), changes);
+    } catch (err) {
+      console.error('Failed to adjust batch counts:', err);
+    }
+  };
+
+  const handleRevoke = async (password: PasswordDoc) => {
     if (!confirm('Are you sure you want to revoke this password link?')) return;
 
-    setActionLoading(passwordId);
+    setActionLoading(password.id);
     try {
-      await updateDoc(doc(db, 'passwords', passwordId), {
+      await updateDoc(doc(db, 'passwords', password.id), {
         status: 'revoked',
+      });
+      await adjustBatchCounts(password.batchId, {
+        [`counts.${password.status}`]: increment(-1),
+        'counts.revoked': increment(1),
       });
       await loadPasswords();
       showToast('Password link revoked', 'success');
@@ -406,10 +532,10 @@ export function QueuePage() {
     }
   };
 
-  const handleDeleteClick = (passwordId: string) => {
+  const handleDeleteClick = (password: PasswordDoc) => {
     // If already confirming this item, perform the delete
-    if (deleteConfirmId === passwordId) {
-      performDelete(passwordId);
+    if (deleteConfirmId === password.id) {
+      performDelete(password);
       return;
     }
 
@@ -419,7 +545,7 @@ export function QueuePage() {
     }
 
     // Set this item as pending confirmation
-    setDeleteConfirmId(passwordId);
+    setDeleteConfirmId(password.id);
 
     // Auto-reset after 3 seconds
     deleteTimeoutRef.current = setTimeout(() => {
@@ -427,16 +553,20 @@ export function QueuePage() {
     }, 3000);
   };
 
-  const performDelete = async (passwordId: string) => {
+  const performDelete = async (password: PasswordDoc) => {
     // Clear the confirmation state
     setDeleteConfirmId(null);
     if (deleteTimeoutRef.current) {
       clearTimeout(deleteTimeoutRef.current);
     }
 
-    setActionLoading(passwordId);
+    setActionLoading(password.id);
     try {
-      await deleteDoc(doc(db, 'passwords', passwordId));
+      await deleteDoc(doc(db, 'passwords', password.id));
+      await adjustBatchCounts(password.batchId, {
+        [`counts.${password.status}`]: increment(-1),
+        size: increment(-1),
+      });
       await loadPasswords();
       showToast('Record deleted', 'success');
     } catch (error) {
@@ -452,21 +582,67 @@ export function QueuePage() {
     if (!confirm(`Send emails to ${selectedIds.size} recipients?`)) return;
 
     setActionLoading('bulk');
-    try {
-      const sendEmail = httpsCallable(functions, 'sendPasswordEmail');
-      for (const id of selectedIds) {
+    // Per-item try/catch so one failure doesn't abort the rest of the batch —
+    // and we report exactly how many succeeded/failed.
+    const sendEmail = httpsCallable(functions, 'sendPasswordEmail');
+    let sent = 0;
+    let failed = 0;
+    for (const id of selectedIds) {
+      try {
         await sendEmail({ passwordId: id });
+        sent += 1;
+      } catch (error) {
+        console.error(`Failed to send email for ${id}:`, error);
+        failed += 1;
       }
-      const count = selectedIds.size;
-      setSelectedIds(new Set());
-      await loadPasswords();
-      showToast(`Sent ${count} emails successfully`, 'success');
-    } catch (error) {
-      console.error('Error sending bulk emails:', error);
-      showToast('Some emails may have failed to send', 'error');
-    } finally {
-      setActionLoading(null);
     }
+    setSelectedIds(new Set());
+    await loadPasswords();
+    setActionLoading(null);
+    if (failed === 0) {
+      showToast(`Sent ${sent} email${sent === 1 ? '' : 's'} successfully`, 'success');
+    } else {
+      showToast(`Sent ${sent}, ${failed} failed. Retry the failures individually.`, 'error');
+    }
+  };
+
+  // Trigger the durable server-side batch send. Progress shows live via the
+  // batch's sendJob (useBatches snapshot); this await resolves when the whole
+  // job finishes for a final summary toast.
+  const handleSendBatch = async (batchId: string, mode: 'remaining' | 'failed') => {
+    setBatchSending((prev) => new Set(prev).add(batchId));
+    try {
+      // Server send can run for minutes; the callable client default is 70s.
+      const sendBatchEmails = httpsCallable(functions, 'sendBatchEmails', {
+        timeout: 540000,
+      });
+      const res = await sendBatchEmails({ batchId, mode });
+      const { sent, failed } = (res.data || {}) as { sent?: number; failed?: number };
+      if (failed) {
+        showToast(`Batch send finished: ${sent ?? 0} sent, ${failed} failed`, 'error');
+      } else {
+        showToast(`Batch send finished: ${sent ?? 0} sent`, 'success');
+      }
+      loadStatCounts();
+    } catch (error) {
+      console.error('Batch send failed:', error);
+      showToast('Batch send failed to start', 'error');
+    } finally {
+      setBatchSending((prev) => {
+        const next = new Set(prev);
+        next.delete(batchId);
+        return next;
+      });
+    }
+  };
+
+  const toggleBatch = (batchId: string) => {
+    setExpandedBatches((prev) => {
+      const next = new Set(prev);
+      if (next.has(batchId)) next.delete(batchId);
+      else next.add(batchId);
+      return next;
+    });
   };
 
   const formatDate = (date: Date | { toDate: () => Date } | undefined) => {
@@ -495,6 +671,108 @@ export function QueuePage() {
     if (days < 7) return `${days}d ago`;
     return '';
   };
+
+  // Renders one password link row. Used both for standalone links and for the
+  // member rows revealed when a batch group is expanded (isMember indents them).
+  const renderRow = (password: PasswordDoc, isMember: boolean) => (
+    <tr
+      key={password.id}
+      className={`${selectedIds.has(password.id) ? styles.selected : ''} ${password.status === 'viewed' ? styles.rowViewed : ''} ${isMember ? styles.memberRow : ''}`}
+    >
+      <td className={styles.checkCol}>
+        <input
+          type="checkbox"
+          checked={selectedIds.has(password.id)}
+          onChange={() => handleSelect(password.id)}
+        />
+      </td>
+      <td>
+        <div className={styles.recipient}>
+          <span className={styles.recipientName}>
+            {password.recipientName || password.recipientEmail.split('@')[0]}
+          </span>
+          <span className={styles.recipientEmail}>{password.recipientEmail}</span>
+        </div>
+      </td>
+      <td>
+        <div className={styles.dateInfo}>
+          <span className={styles.dateMain}>{formatDate(password.createdAt)}</span>
+          <span className={styles.dateRelative}>{getRelativeTime(password.createdAt)}</span>
+        </div>
+      </td>
+      <td>
+        <span className={`${styles.statusBadge} ${styles[`status-${password.status}`]}`}>
+          {password.status === 'pending' && !password.emailSent && (
+            <span className={styles.statusDot} />
+          )}
+          {password.status}
+          {password.status === 'viewed' && password.viewedAt && (
+            <span className={styles.statusMeta}>{formatDate(password.viewedAt)}</span>
+          )}
+        </span>
+        {password.status === 'failed' && password.lastError && (
+          <span className={styles.errorText} title={password.lastError}>
+            {password.lastError}
+          </span>
+        )}
+      </td>
+      <td className={styles.actionsCol}>
+        <div className={styles.actions}>
+          {(password.status === 'pending' ||
+            password.status === 'sent' ||
+            password.status === 'failed') && (
+            <>
+              <button
+                className={`${styles.actionBtn} ${styles.primary}`}
+                onClick={() => handleSendEmail(password.id)}
+                disabled={!!actionLoading}
+                title={password.emailSent ? 'Resend email' : 'Send email'}
+              >
+                {actionLoading === password.id ? (
+                  <span className={styles.spinner} />
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M22 2L11 13" />
+                    <path d="M22 2L15 22L11 13L2 9L22 2Z" />
+                  </svg>
+                )}
+                {password.status === 'failed' ? 'Retry' : password.emailSent ? 'Resend' : 'Send'}
+              </button>
+              <button
+                className={styles.actionBtn}
+                onClick={() => handleRevoke(password)}
+                disabled={!!actionLoading}
+                title="Revoke link"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="15" y1="9" x2="9" y2="15" />
+                  <line x1="9" y1="9" x2="15" y2="15" />
+                </svg>
+              </button>
+            </>
+          )}
+          {user?.role === 'admin' && (
+            <button
+              className={`${styles.actionBtn} ${styles.danger} ${deleteConfirmId === password.id ? styles.confirmDelete : ''}`}
+              onClick={() => handleDeleteClick(password)}
+              disabled={!!actionLoading}
+              title={deleteConfirmId === password.id ? 'Click again to confirm delete' : 'Delete'}
+            >
+              {deleteConfirmId === password.id ? (
+                <span className={styles.confirmText}>Confirm?</span>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="3,6 5,6 21,6" />
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
+              )}
+            </button>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
 
   return (
     <Layout>
@@ -548,8 +826,16 @@ export function QueuePage() {
             <span className={styles.statLabel}>Viewed</span>
           </button>
           <button
-            className={`${styles.statCard} ${styles.expired} ${filterStatus === 'expired' ? styles.active : ''}`}
-            onClick={() => setFilterStatus('expired')}
+            className={`${styles.statCard} ${styles.failed} ${filterStatus === 'failed' ? styles.active : ''}`}
+            onClick={() => setFilterStatus('failed')}
+          >
+            <span className={styles.statValue}>{stats.failed}</span>
+            <span className={styles.statLabel}>Failed</span>
+            {stats.failed > 0 && <span className={styles.statDot} />}
+          </button>
+          <button
+            className={`${styles.statCard} ${styles.expired} ${filterStatus === 'closed' ? styles.active : ''}`}
+            onClick={() => setFilterStatus('closed')}
           >
             <span className={styles.statValue}>{stats.expired + stats.revoked}</span>
             <span className={styles.statLabel}>Closed</span>
@@ -683,7 +969,7 @@ export function QueuePage() {
                 </div>
               ))}
             </div>
-          ) : loading ? null : passwords.length === 0 ? (
+          ) : loading ? null : isEmpty ? (
             <div className={styles.emptyState}>
               <div className={styles.emptyIcon}>
                 {debouncedSearchEmail ? (
@@ -739,7 +1025,7 @@ export function QueuePage() {
                   <th className={styles.checkCol}>
                     <input
                       type="checkbox"
-                      checked={selectedIds.size === passwords.length && passwords.length > 0}
+                      checked={allPageSelected}
                       onChange={handleSelectAll}
                     />
                   </th>
@@ -750,107 +1036,32 @@ export function QueuePage() {
                 </tr>
               </thead>
               <tbody>
-                {passwords.map((password) => (
-                  <tr
-                    key={password.id}
-                    className={`${selectedIds.has(password.id) ? styles.selected : ''} ${password.status === 'viewed' ? styles.rowViewed : ''}`}
-                  >
-                    <td className={styles.checkCol}>
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.has(password.id)}
-                        onChange={() => handleSelect(password.id)}
-                      />
-                    </td>
-                    <td>
-                      <div className={styles.recipient}>
-                        <span className={styles.recipientName}>
-                          {password.recipientName || password.recipientEmail.split('@')[0]}
-                        </span>
-                        <span className={styles.recipientEmail}>{password.recipientEmail}</span>
-                      </div>
-                    </td>
-                    <td>
-                      <div className={styles.dateInfo}>
-                        <span className={styles.dateMain}>{formatDate(password.createdAt)}</span>
-                        <span className={styles.dateRelative}>{getRelativeTime(password.createdAt)}</span>
-                      </div>
-                    </td>
-                    <td>
-                      <span className={`${styles.statusBadge} ${styles[`status-${password.status}`]}`}>
-                        {password.status === 'pending' && !password.emailSent && (
-                          <span className={styles.statusDot} />
-                        )}
-                        {password.status}
-                        {password.status === 'viewed' && password.viewedAt && (
-                          <span className={styles.statusMeta}>
-                            {formatDate(password.viewedAt)}
-                          </span>
-                        )}
-                      </span>
-                    </td>
-                    <td className={styles.actionsCol}>
-                      <div className={styles.actions}>
-                        {(password.status === 'pending' || password.status === 'sent') && (
-                          <>
-                            <button
-                              className={`${styles.actionBtn} ${styles.primary}`}
-                              onClick={() => handleSendEmail(password.id)}
-                              disabled={!!actionLoading}
-                              title={password.emailSent ? 'Resend email' : 'Send email'}
-                            >
-                              {actionLoading === password.id ? (
-                                <span className={styles.spinner} />
-                              ) : (
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                  <path d="M22 2L11 13" />
-                                  <path d="M22 2L15 22L11 13L2 9L22 2Z" />
-                                </svg>
-                              )}
-                              {password.emailSent ? 'Resend' : 'Send'}
-                            </button>
-                            <button
-                              className={styles.actionBtn}
-                              onClick={() => handleRevoke(password.id)}
-                              disabled={!!actionLoading}
-                              title="Revoke link"
-                            >
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <circle cx="12" cy="12" r="10" />
-                                <line x1="15" y1="9" x2="9" y2="15" />
-                                <line x1="9" y1="9" x2="15" y2="15" />
-                              </svg>
-                            </button>
-                          </>
-                        )}
-                        {user?.role === 'admin' && (
-                          <button
-                            className={`${styles.actionBtn} ${styles.danger} ${deleteConfirmId === password.id ? styles.confirmDelete : ''}`}
-                            onClick={() => handleDeleteClick(password.id)}
-                            disabled={!!actionLoading}
-                            title={deleteConfirmId === password.id ? "Click again to confirm delete" : "Delete"}
-                          >
-                            {deleteConfirmId === password.id ? (
-                              <span className={styles.confirmText}>Confirm?</span>
-                            ) : (
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <polyline points="3,6 5,6 21,6" />
-                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                              </svg>
-                            )}
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {isSearchMode
+                  ? pageSearchResults.map((p) => renderRow(p, false))
+                  : pageStreamItems.map((item) =>
+                      item.kind === 'batch' ? (
+                        <BatchGroupRow
+                          key={item.id}
+                          batch={item.batch}
+                          expanded={expandedBatches.has(item.id)}
+                          sending={batchSending.has(item.id)}
+                          onToggle={() => toggleBatch(item.id)}
+                          onSend={(mode) => handleSendBatch(item.id, mode)}
+                          renderRow={renderRow}
+                          formatDate={formatDate}
+                          getRelativeTime={getRelativeTime}
+                        />
+                      ) : (
+                        renderRow(item.password, false)
+                      )
+                    )}
               </tbody>
             </table>
           )}
         </motion.div>
 
         {/* Pagination Controls */}
-        {!loading && passwords.length > 0 && (
+        {!loading && !isEmpty && (
           <div className={styles.pagination}>
             <div className={styles.paginationLeft}>
               <label className={styles.pageSizeLabel}>Show:</label>
@@ -895,7 +1106,17 @@ export function QueuePage() {
             </div>
             <div className={styles.paginationRight}>
               <span className={styles.itemCount}>
-                {filteredPasswords.length} {filteredPasswords.length === 1 ? 'result' : 'results'}
+                {isSearchMode
+                  ? `${activeLength} ${activeLength === 1 ? 'result' : 'results'}`
+                  : (() => {
+                      const batchCount = streamItems.filter((i) => i.kind === 'batch').length;
+                      const linkCount = streamItems.length - batchCount;
+                      return batchCount > 0
+                        ? `${streamItems.length} items · ${batchCount} ${
+                            batchCount === 1 ? 'batch' : 'batches'
+                          }, ${linkCount} ${linkCount === 1 ? 'link' : 'links'}`
+                        : `${linkCount} ${linkCount === 1 ? 'link' : 'links'}`;
+                    })()}
               </span>
             </div>
           </div>

@@ -1,6 +1,8 @@
 import { useState, useRef } from 'react';
 import { httpsCallable } from 'firebase/functions';
-import { functions } from '../services/firebase';
+import { doc, setDoc, updateDoc, increment, Timestamp } from 'firebase/firestore';
+import { db, functions } from '../services/firebase';
+import { useAuth } from '../hooks/useAuth';
 import { Layout } from '../components/layout/Layout';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/common/Card';
 import { Button } from '../components/common/Button';
@@ -33,6 +35,7 @@ const EXAMPLE_CSV_DATA = [
 ];
 
 export function BatchUploadPage() {
+  const { user } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [rows, setRows] = useState<BatchRow[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -40,12 +43,14 @@ export function BatchUploadPage() {
   const [step, setStep] = useState<'upload' | 'preview' | 'results'>('upload');
   const [sendEmails, setSendEmails] = useState(false);
   const [batchId, setBatchId] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string>('');
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setFileName(file.name);
     const reader = new FileReader();
     reader.onload = (event) => {
       const text = event.target?.result as string;
@@ -108,13 +113,42 @@ export function BatchUploadPage() {
 
     setUploading(true);
     const uploadResults: UploadResult[] = [];
-    const newBatchId = `batch-${Date.now()}`;
+    const newBatchId = crypto.randomUUID();
+    const batchName =
+      fileName ||
+      `CSV batch — ${new Date().toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      })}`;
     setBatchId(newBatchId);
     setUploadProgress({ current: 0, total: validRows.length });
 
     try {
+      // Create the batch record first so the queue can group these links and
+      // track send progress. Counts start with everything pending.
+      await setDoc(doc(db, 'batches', newBatchId), {
+        name: batchName,
+        size: validRows.length,
+        createdBy: user?.id || '',
+        createdByEmail: user?.email || '',
+        createdAt: Timestamp.now(),
+        counts: {
+          pending: validRows.length,
+          sent: 0,
+          viewed: 0,
+          failed: 0,
+          expired: 0,
+          revoked: 0,
+        },
+      });
+
       const createPasswordLink = httpsCallable(functions, 'createPasswordLink');
 
+      // Create the links (never send inline — sending is a separate, durable,
+      // throttled server job so 300+ recipients don't trip Gmail's rate limit).
+      let createFailures = 0;
       for (let i = 0; i < validRows.length; i++) {
         const row = validRows[i];
         setUploadProgress({ current: i + 1, total: validRows.length });
@@ -124,8 +158,9 @@ export function BatchUploadPage() {
             recipientEmail: row.email,
             recipientName: row.name,
             password: row.password,
-            notes: `${row.notes}${row.notes ? ' | ' : ''}Batch: ${newBatchId}`,
-            sendNotification: sendEmails,
+            notes: row.notes,
+            sendNotification: false,
+            batchId: newBatchId,
           });
 
           const data = response.data as { link: string };
@@ -137,6 +172,7 @@ export function BatchUploadPage() {
             emailSent: sendEmails,
           });
         } catch (error) {
+          createFailures++;
           uploadResults.push({
             email: row.email,
             name: row.name,
@@ -144,6 +180,27 @@ export function BatchUploadPage() {
             error: 'Failed to create link',
           });
         }
+      }
+
+      // Correct the batch counts if any link failed to create.
+      if (createFailures > 0) {
+        await updateDoc(doc(db, 'batches', newBatchId), {
+          size: increment(-createFailures),
+          'counts.pending': increment(-createFailures),
+        });
+      }
+
+      // Kick off the durable server-side send. We don't await it — it runs to
+      // completion server-side and the queue shows live progress.
+      if (sendEmails && uploadResults.some((r) => r.success)) {
+        // Long-running server job; raise the callable timeout past the 70s
+        // default. Fire-and-forget — the queue shows live progress.
+        const sendBatchEmails = httpsCallable(functions, 'sendBatchEmails', {
+          timeout: 540000,
+        });
+        sendBatchEmails({ batchId: newBatchId }).catch((err) => {
+          console.error('Failed to start batch send:', err);
+        });
       }
 
       setResults(uploadResults);
@@ -190,6 +247,7 @@ export function BatchUploadPage() {
     setStep('upload');
     setSendEmails(false);
     setBatchId(null);
+    setFileName('');
     setUploadProgress({ current: 0, total: 0 });
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -453,7 +511,7 @@ export function BatchUploadPage() {
                   <span className={`${styles.summaryValue} ${sendEmails ? styles.success : ''}`}>
                     {results.filter(r => r.emailSent).length}
                   </span>
-                  <span className={styles.summaryLabel}>Emails Sent</span>
+                  <span className={styles.summaryLabel}>Emails Queued</span>
                 </div>
                 <div className={styles.summaryItem}>
                   <span className={`${styles.summaryValue} ${styles.error}`}>
@@ -463,6 +521,31 @@ export function BatchUploadPage() {
                 </div>
               </div>
             </Card>
+
+            {sendEmails && successCount > 0 && (
+              <Card className={styles.nextStepsCard}>
+                <div className={styles.nextSteps}>
+                  <div className={styles.nextStepsIcon}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M22 2L11 13M22 2L15 22 11 13 2 9 22 2Z" />
+                    </svg>
+                  </div>
+                  <div className={styles.nextStepsContent}>
+                    <h4>Emails are sending…</h4>
+                    <p>
+                      Your {successCount} links were created and are being emailed in the
+                      background — throttled so large batches send reliably. Track live
+                      progress, and resend any failures, from the Queue.
+                    </p>
+                    <a href={`/admin/queue?batch=${batchId}`} className={styles.nextStepsLink}>
+                      <Button variant="primary">
+                        View Send Progress in Queue
+                      </Button>
+                    </a>
+                  </div>
+                </div>
+              </Card>
+            )}
 
             {!sendEmails && successCount > 0 && (
               <Card className={styles.nextStepsCard}>
@@ -530,7 +613,7 @@ export function BatchUploadPage() {
                           <td>
                             {result.success ? (
                               result.emailSent ? (
-                                <span className={styles.sentBadge}>Sent</span>
+                                <span className={styles.sentBadge}>Queued</span>
                               ) : (
                                 <span className={styles.pendingBadge}>Pending</span>
                               )

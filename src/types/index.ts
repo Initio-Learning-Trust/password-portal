@@ -10,16 +10,47 @@ export interface PasswordDoc {
   createdBy: string;
   createdByEmail: string;
   createdAt: Date;
-  status: 'pending' | 'sent' | 'viewed' | 'expired' | 'revoked';
+  status: 'pending' | 'sent' | 'viewed' | 'expired' | 'revoked' | 'failed';
   viewedAt?: Date;
   viewedFromIP?: string;
   emailSent: boolean;
   emailSentAt?: Date;
   source: 'dashboard' | 'api' | 'batch';
   apiKeyId?: string;
+  batchId?: string;
+  lastError?: string;
   regeneratedFrom?: string;
   regeneratedTo?: string;
   searchTokens?: string[];
+}
+
+export type BatchCountStatus =
+  | 'pending'
+  | 'sent'
+  | 'viewed'
+  | 'failed'
+  | 'expired'
+  | 'revoked';
+
+export interface BatchSendJob {
+  state: 'running' | 'done' | 'cancelled';
+  total: number;
+  sent: number;
+  failed: number;
+  startedAt?: Date;
+  finishedAt?: Date;
+  requestedBy?: string;
+}
+
+export interface BatchDoc {
+  id: string;
+  name: string;
+  size: number;
+  createdBy: string;
+  createdByEmail: string;
+  createdAt: Date;
+  counts: Record<BatchCountStatus, number>;
+  sendJob?: BatchSendJob;
 }
 
 export interface ApiKeyDoc {

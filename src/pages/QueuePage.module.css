@@ -126,6 +126,7 @@
 .statCard.pending .statValue { color: #d97706; }
 .statCard.sent .statValue { color: #0d9488; }
 .statCard.viewed .statValue { color: #059669; }
+.statCard.failed .statValue { color: #dc2626; }
 .statCard.expired .statValue { color: var(--color-text-muted); }
 
 /* Toolbar */
@@ -557,6 +558,36 @@
 .status-revoked {
   background: var(--color-border-light);
   color: var(--color-text-muted);
+}
+
+.status-failed {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+/* Failed reason shown under the status badge on a failed row. */
+.errorText {
+  display: block;
+  margin-top: 0.25rem;
+  max-width: 220px;
+  font-size: 0.6875rem;
+  color: #b91c1c;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Batch member rows: indented under their group with a guide line. */
+.table tbody tr.memberRow > td:first-child {
+  box-shadow: inset 2px 0 0 var(--color-border);
+}
+
+.memberRow > td:nth-child(2) {
+  padding-left: 1.5rem;
+}
+
+.memberRow {
+  background: color-mix(in srgb, var(--color-bg-subtle) 40%, transparent);
 }
 
 /* Actions */
