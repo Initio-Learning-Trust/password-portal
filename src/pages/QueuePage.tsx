@@ -645,6 +645,23 @@ export function QueuePage() {
     });
   };
 
+  // Clear the search and open a batch — used by the batch chip on search hits.
+  const jumpToBatch = (batchId: string) => {
+    setSearchEmail('');
+    setExpandedBatches((prev) => new Set(prev).add(batchId));
+  };
+
+  // Batches currently mid-send drive the global "sending" strip.
+  const runningBatches = useMemo(
+    () => batches.filter((b) => b.sendJob?.state === 'running'),
+    [batches]
+  );
+  const batchNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    batches.forEach((b) => map.set(b.id, b.name));
+    return map;
+  }, [batches]);
+
   const formatDate = (date: Date | { toDate: () => Date } | undefined) => {
     if (!date) return '-';
     const d = date instanceof Date ? date : date.toDate();
@@ -692,6 +709,21 @@ export function QueuePage() {
             {password.recipientName || password.recipientEmail.split('@')[0]}
           </span>
           <span className={styles.recipientEmail}>{password.recipientEmail}</span>
+          {!isMember && password.batchId && (
+            <button
+              type="button"
+              className={styles.batchChip}
+              onClick={() => jumpToBatch(password.batchId!)}
+              title="Show this batch"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 2 2 7l10 5 10-5-10-5Z" />
+                <path d="M2 17l10 5 10-5" />
+                <path d="M2 12l10 5 10-5" />
+              </svg>
+              {batchNameById.get(password.batchId) || 'Batch'}
+            </button>
+          )}
         </div>
       </td>
       <td>
@@ -946,6 +978,36 @@ export function QueuePage() {
             </button>
           </div>
         </div>
+
+        {/* Global send-in-progress strip */}
+        <AnimatePresence>
+          {runningBatches.length > 0 && (
+            <motion.div
+              className={styles.sendingStrip}
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.2 }}
+            >
+              <span className={styles.sendingSpinner} />
+              <span className={styles.sendingText}>
+                {runningBatches.map((b, i) => {
+                  const done = (b.sendJob?.sent || 0) + (b.sendJob?.failed || 0);
+                  const total = b.sendJob?.total || 0;
+                  return (
+                    <span key={b.id}>
+                      {i > 0 && ' · '}
+                      Sending <strong>{b.name}</strong> — {done}/{total}
+                      {b.sendJob && b.sendJob.failed > 0 && (
+                        <span className={styles.sendingFailed}> ({b.sendJob.failed} failed)</span>
+                      )}
+                    </span>
+                  );
+                })}
+              </span>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Table */}
         <motion.div

@@ -565,6 +565,62 @@
   color: #b91c1c;
 }
 
+/* Global "sending in progress" strip under the toolbar. */
+.sendingStrip {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+  padding: 0.6rem 0.9rem;
+  background: linear-gradient(135deg, rgba(137, 204, 202, 0.2), rgba(137, 204, 202, 0.08));
+  border: 1px solid var(--color-aqua);
+  border-radius: var(--radius-md);
+  font-size: 0.85rem;
+  color: var(--color-deep-blue);
+  font-variant-numeric: tabular-nums;
+}
+
+.sendingText strong {
+  font-weight: 700;
+}
+
+.sendingFailed {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.sendingSpinner {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgba(40, 62, 73, 0.25);
+  border-top-color: var(--color-deep-blue);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* Batch chip on a search-result row that belongs to a batch. */
+.batchChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.3rem;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--color-deep-blue);
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.batchChip:hover {
+  background: var(--color-white);
+  border-color: var(--color-aqua);
+}
+
 /* Failed reason shown under the status badge on a failed row. */
 .errorText {
   display: block;
