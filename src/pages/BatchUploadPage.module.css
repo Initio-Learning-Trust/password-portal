@@ -63,6 +63,11 @@
   display: flex;
   gap: 0.75rem;
   justify-content: center;
+  /* Sit above the full-area file input overlay so the buttons receive their
+     own clicks (otherwise every click hits the hidden input and opens the
+     file picker — including "Download Template"). */
+  position: relative;
+  z-index: 1;
 }
 
 /* Format info */
