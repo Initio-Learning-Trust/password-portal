@@ -9,6 +9,7 @@ import { CreatePasswordPage } from './pages/CreatePasswordPage';
 import { GeneratePasswordsPage } from './pages/GeneratePasswordsPage';
 import { PasswordViewPage } from './pages/PasswordViewPage';
 import { QueuePage } from './pages/QueuePage';
+import { BatchDetailPage } from './pages/BatchDetailPage';
 import { BatchUploadPage } from './pages/BatchUploadPage';
 import { SettingsPage } from './pages/SettingsPage';
 import './styles/global.css';
@@ -75,6 +76,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <QueuePage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/queue/batch/:batchId"
+        element={
+          <ProtectedRoute>
+            <BatchDetailPage />
           </ProtectedRoute>
         }
       />

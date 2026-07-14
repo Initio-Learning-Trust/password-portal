@@ -1,33 +1,27 @@
-import type { ReactNode } from 'react';
-import type { BatchDoc, PasswordDoc } from '../../types';
-import { useBatchMembers } from '../../hooks/useBatchMembers';
+import type { BatchDoc } from '../../types';
 import { BatchProgressBar } from './BatchProgressBar';
 import styles from './BatchGroupRow.module.css';
 
 interface BatchGroupRowProps {
   batch: BatchDoc;
-  expanded: boolean;
   sending: boolean;
-  onToggle: () => void;
+  onOpen: () => void;
   onSend: (mode: 'remaining' | 'failed') => void;
-  renderRow: (password: PasswordDoc, isMember: boolean) => ReactNode;
   formatDate: (date: Date | { toDate: () => Date } | undefined) => string;
   getRelativeTime: (date: Date | { toDate: () => Date } | undefined) => string;
 }
 
+// One batch summary row in the Batches tab. Clicking it (or Open) drills into
+// the dedicated, paginated batch detail page — batches are never expanded
+// inline, so a 300-recipient batch can't flood the list.
 export function BatchGroupRow({
   batch,
-  expanded,
   sending,
-  onToggle,
+  onOpen,
   onSend,
-  renderRow,
   formatDate,
   getRelativeTime,
 }: BatchGroupRowProps) {
-  const { members, loading: membersLoading } = useBatchMembers(
-    expanded ? batch.id : null
-  );
   const counts = batch.counts || {
     pending: 0,
     sent: 0,
@@ -39,7 +33,7 @@ export function BatchGroupRow({
   const running = batch.sendJob?.state === 'running';
   const busy = running || sending;
 
-  const renderAction = () => {
+  const renderSendAction = () => {
     if (busy) {
       const done = (batch.sendJob?.sent || 0) + (batch.sendJob?.failed || 0);
       const total = batch.sendJob?.total || 0;
@@ -84,72 +78,54 @@ export function BatchGroupRow({
   };
 
   return (
-    <>
-      <tr className={styles.batchRow} onClick={onToggle}>
-        <td />
-        <td>
-          <div className={styles.identity}>
-            <svg
-              className={`${styles.chevron} ${expanded ? styles.chevronOpen : ''}`}
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-            >
+    <tr className={styles.batchRow} onClick={onOpen}>
+      <td />
+      <td>
+        <div className={styles.identity}>
+          <svg className={styles.icon} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M12 2 2 7l10 5 10-5-10-5Z" />
+            <path d="M2 17l10 5 10-5" />
+            <path d="M2 12l10 5 10-5" />
+          </svg>
+          <div className={styles.nameWrap}>
+            <span className={styles.name}>
+              {batch.name}
+              <span className={styles.size}>{batch.size} recipients</span>
+            </span>
+            {batch.createdByEmail && (
+              <span className={styles.creator}>by {batch.createdByEmail}</span>
+            )}
+          </div>
+        </div>
+      </td>
+      <td>
+        <div>
+          <div>{formatDate(batch.createdAt)}</div>
+          <div className={styles.creator}>{getRelativeTime(batch.createdAt)}</div>
+        </div>
+      </td>
+      <td>
+        <div className={styles.statusCell}>
+          <BatchProgressBar counts={counts} size={batch.size} running={running} />
+          <span className={styles.countLine}>
+            {counts.sent} sent · {counts.viewed} viewed · {counts.pending} pending
+            {counts.failed > 0 && (
+              <span className={styles.failedCount}> · {counts.failed} failed</span>
+            )}
+          </span>
+        </div>
+      </td>
+      <td>
+        <div className={styles.actions} onClick={(e) => e.stopPropagation()}>
+          {renderSendAction()}
+          <button className={styles.openBtn} onClick={onOpen}>
+            Open
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
               <polyline points="9,6 15,12 9,18" />
             </svg>
-            <svg className={styles.icon} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 2 2 7l10 5 10-5-10-5Z" />
-              <path d="M2 17l10 5 10-5" />
-              <path d="M2 12l10 5 10-5" />
-            </svg>
-            <div className={styles.nameWrap}>
-              <span className={styles.name}>
-                {batch.name}
-                <span className={styles.size}>{batch.size} recipients</span>
-              </span>
-              {batch.createdByEmail && (
-                <span className={styles.creator}>by {batch.createdByEmail}</span>
-              )}
-            </div>
-          </div>
-        </td>
-        <td>
-          <div>
-            <div>{formatDate(batch.createdAt)}</div>
-            <div className={styles.creator}>{getRelativeTime(batch.createdAt)}</div>
-          </div>
-        </td>
-        <td>
-          <div className={styles.statusCell}>
-            <BatchProgressBar counts={counts} size={batch.size} running={running} />
-            <span className={styles.countLine}>
-              {counts.sent} sent · {counts.viewed} viewed · {counts.pending} pending
-              {counts.failed > 0 && (
-                <span className={styles.failedCount}> · {counts.failed} failed</span>
-              )}
-            </span>
-          </div>
-        </td>
-        <td>
-          <div className={styles.actions} onClick={(e) => e.stopPropagation()}>
-            {renderAction()}
-          </div>
-        </td>
-      </tr>
-      {expanded &&
-        (membersLoading && members.length === 0 ? (
-          <tr>
-            <td />
-            <td colSpan={4} className={styles.creator} style={{ padding: '0.75rem 0' }}>
-              Loading recipients…
-            </td>
-          </tr>
-        ) : (
-          members.map((m) => renderRow(m, true))
-        ))}
-    </>
+          </button>
+        </div>
+      </td>
+    </tr>
   );
 }

@@ -41,11 +41,6 @@ function toMillis(value: unknown): number {
   return 0;
 }
 
-// A row in the queue is either a batch group or a standalone link.
-type StreamItem =
-  | { kind: 'batch'; id: string; createdAt: unknown; batch: BatchDoc }
-  | { kind: 'single'; id: string; createdAt: unknown; password: PasswordDoc };
-
 // Cap for the baseline "most recent" query that powers the stat counters and
 // the default view. When the user searches, we issue a separate array-contains
 // query that is NOT subject to this cap — it's bounded by SEARCH_CAP instead.
@@ -163,10 +158,20 @@ export function QueuePage() {
     expired: 0,
     revoked: 0,
   });
-  // Which batch groups are expanded, and which have a send request in flight
-  // (before the batch doc's sendJob flips to "running").
-  const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
+  // Batches with a send request in flight (before the batch doc's sendJob
+  // flips to "running").
   const [batchSending, setBatchSending] = useState<Set<string>>(new Set());
+
+  // Active tab (Links | Batches), persisted in the URL so back-navigation from
+  // a batch detail page returns to the right tab.
+  const tab: 'links' | 'batches' =
+    searchParams.get('tab') === 'batches' ? 'batches' : 'links';
+  const setTab = (t: 'links' | 'batches') => {
+    const next = new URLSearchParams(searchParams);
+    if (t === 'batches') next.set('tab', 'batches');
+    else next.delete('tab');
+    setSearchParams(next, { replace: true });
+  };
   const [loading, setLoading] = useState(true);
   const showSkeleton = useDelayedLoading(loading);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -284,25 +289,21 @@ export function QueuePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSearchEmail]);
 
-  // Reset pagination when the filtered view changes.
+  // Reset pagination and clear selection when the view changes.
   useEffect(() => {
     setPageIndex(0);
-  }, [filterStatus, debouncedSearchEmail, pageSize]);
+    setSelectedIds(new Set());
+  }, [filterStatus, debouncedSearchEmail, pageSize, tab]);
 
-  // Honor the ?batch=<id> deep link from Batch Upload: expand that batch once
-  // it has loaded, then drop the param so it doesn't re-trigger.
+  // Honor the ?batch=<id> deep link from Batch Upload by opening that batch's
+  // detail page directly.
   const batchParamHandled = useRef(false);
   useEffect(() => {
     const batchParam = searchParams.get('batch');
     if (!batchParam || batchParamHandled.current) return;
-    if (batches.some((b) => b.id === batchParam)) {
-      batchParamHandled.current = true;
-      setExpandedBatches((prev) => new Set(prev).add(batchParam));
-      const next = new URLSearchParams(searchParams);
-      next.delete('batch');
-      setSearchParams(next, { replace: true });
-    }
-  }, [batches, searchParams, setSearchParams]);
+    batchParamHandled.current = true;
+    navigate(`/admin/queue/batch/${batchParam}`, { replace: true });
+  }, [searchParams, navigate]);
 
   const loadPasswords = async () => {
     const mySeq = ++loadSeqRef.current;
@@ -362,7 +363,7 @@ export function QueuePage() {
     }
   };
 
-  // In search mode we show a flat list of matching links (batch members
+  // In search mode the Links tab shows a flat list of matches (batch members
   // included) — hunting for a person shouldn't be gated behind a group.
   const isSearchMode = searchResults !== null;
 
@@ -384,65 +385,50 @@ export function QueuePage() {
     }
   };
 
-  // Standalone links only — batch members live under their batch group.
+  // Standalone links only — batch links live under the Batches tab.
   const singlePasswords = useMemo(
     () => allPasswords.filter((p) => !p.batchId),
     [allPasswords]
   );
 
-  // Non-search: interleave batch groups and single links by creation time.
-  const streamItems = useMemo<StreamItem[]>(() => {
-    const items: StreamItem[] = [];
-    for (const b of batches) {
-      if (batchMatchesFilter(b)) {
-        items.push({ kind: 'batch', id: b.id, createdAt: b.createdAt, batch: b });
-      }
-    }
-    for (const p of singlePasswords) {
-      if (singleMatchesFilter(p.status)) {
-        items.push({ kind: 'single', id: p.id, createdAt: p.createdAt, password: p });
-      }
-    }
-    items.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-    return items;
+  // Links tab list: individual links (or flat search matches), status-filtered.
+  const linkList = useMemo(() => {
+    const source = isSearchMode ? searchResults ?? [] : singlePasswords;
+    const filtered =
+      filterStatus === 'all'
+        ? source
+        : source.filter((p) => singleMatchesFilter(p.status));
+    return [...filtered].sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [batches, singlePasswords, filterStatus]);
+  }, [isSearchMode, searchResults, singlePasswords, filterStatus]);
 
-  // Search mode: flat, status-filtered results.
-  const searchFiltered = useMemo(() => {
-    if (searchResults === null) return null;
-    if (filterStatus === 'all') return searchResults;
-    return searchResults.filter((p) => singleMatchesFilter(p.status));
+  // Batches tab list: batches matching the active status filter (already
+  // newest-first from the subscription).
+  const batchList = useMemo(
+    () => batches.filter(batchMatchesFilter),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchResults, filterStatus]);
+    [batches, filterStatus]
+  );
 
-  const activeLength = isSearchMode ? searchFiltered?.length ?? 0 : streamItems.length;
+  const activeLength = tab === 'batches' ? batchList.length : linkList.length;
   const totalPages = Math.max(1, Math.ceil(activeLength / pageSize));
   const safePageIndex = Math.min(pageIndex, totalPages - 1);
   const pageStart = safePageIndex * pageSize;
   const pageEnd = pageStart + pageSize;
 
-  const pageStreamItems = useMemo(
-    () => streamItems.slice(pageStart, pageEnd),
-    [streamItems, pageStart, pageEnd]
+  const pageLinks = useMemo(
+    () => linkList.slice(pageStart, pageEnd),
+    [linkList, pageStart, pageEnd]
   );
-  const pageSearchResults = useMemo(
-    () => (searchFiltered ? searchFiltered.slice(pageStart, pageEnd) : []),
-    [searchFiltered, pageStart, pageEnd]
-  );
-
-  // Single-link ids visible on the current page — drives select-all.
-  const pageSingleIds = useMemo(
-    () =>
-      isSearchMode
-        ? pageSearchResults.map((p) => p.id)
-        : pageStreamItems.filter((i) => i.kind === 'single').map((i) => i.id),
-    [isSearchMode, pageSearchResults, pageStreamItems]
+  const pageBatches = useMemo(
+    () => batchList.slice(pageStart, pageEnd),
+    [batchList, pageStart, pageEnd]
   );
 
-  const isEmpty = isSearchMode
-    ? pageSearchResults.length === 0
-    : pageStreamItems.length === 0;
+  // Visible link ids on the current page — drives select-all (Links tab only).
+  const pageSingleIds = useMemo(() => pageLinks.map((p) => p.id), [pageLinks]);
+
+  const isEmpty = tab === 'batches' ? pageBatches.length === 0 : pageLinks.length === 0;
   const hasMore = safePageIndex < totalPages - 1;
   const hasPrev = safePageIndex > 0;
 
@@ -637,19 +623,8 @@ export function QueuePage() {
     }
   };
 
-  const toggleBatch = (batchId: string) => {
-    setExpandedBatches((prev) => {
-      const next = new Set(prev);
-      if (next.has(batchId)) next.delete(batchId);
-      else next.add(batchId);
-      return next;
-    });
-  };
-
-  // Clear the search and open a batch — used by the batch chip on search hits.
-  const jumpToBatch = (batchId: string) => {
-    setSearchEmail('');
-    setExpandedBatches((prev) => new Set(prev).add(batchId));
+  const openBatch = (batchId: string) => {
+    navigate(`/admin/queue/batch/${batchId}`);
   };
 
   // Batches currently mid-send drive the global "sending" strip.
@@ -714,8 +689,8 @@ export function QueuePage() {
             <button
               type="button"
               className={styles.batchChip}
-              onClick={() => jumpToBatch(password.batchId!)}
-              title="Show this batch"
+              onClick={() => openBatch(password.batchId!)}
+              title="Open this batch"
             >
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M12 2 2 7l10 5 10-5-10-5Z" />
@@ -886,8 +861,29 @@ export function QueuePage() {
           </button>
         </div>
 
+        {/* Tabs */}
+        <div className={styles.tabs} role="tablist" aria-label="Queue view">
+          <button
+            role="tab"
+            aria-selected={tab === 'links'}
+            className={`${styles.tab} ${tab === 'links' ? styles.tabActive : ''}`}
+            onClick={() => setTab('links')}
+          >
+            Links
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === 'batches'}
+            className={`${styles.tab} ${tab === 'batches' ? styles.tabActive : ''}`}
+            onClick={() => setTab('batches')}
+          >
+            Batches{batches.length ? ` (${batches.length})` : ''}
+          </button>
+        </div>
+
         {/* Search & Bulk Actions */}
         <div className={styles.toolbar}>
+          {tab === 'links' && (
           <div className={styles.searchBox}>
             <div className={styles.searchIcon} aria-hidden="true">
               <AnimatePresence mode="wait" initial={false}>
@@ -964,6 +960,7 @@ export function QueuePage() {
             )}
             <SearchHelp />
           </div>
+          )}
 
           <div className={styles.toolbarRight}>
             {selectedIds.size > 0 && (
@@ -1046,7 +1043,7 @@ export function QueuePage() {
           ) : loading ? null : isEmpty ? (
             <div className={styles.emptyState}>
               <div className={styles.emptyIcon}>
-                {debouncedSearchEmail ? (
+                {debouncedSearchEmail && tab === 'links' ? (
                   <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                     <circle cx="11" cy="11" r="8" />
                     <line x1="21" y1="21" x2="16.65" y2="16.65" />
@@ -1058,7 +1055,7 @@ export function QueuePage() {
                   </svg>
                 )}
               </div>
-              {debouncedSearchEmail ? (
+              {debouncedSearchEmail && tab === 'links' ? (
                 <>
                   <h3>No matches for "{debouncedSearchEmail}"</h3>
                   <p className={styles.emptySearchHelp}>
@@ -1097,38 +1094,34 @@ export function QueuePage() {
               <thead>
                 <tr>
                   <th className={styles.checkCol}>
-                    <input
-                      type="checkbox"
-                      checked={allPageSelected}
-                      onChange={handleSelectAll}
-                    />
+                    {tab === 'links' && (
+                      <input
+                        type="checkbox"
+                        checked={allPageSelected}
+                        onChange={handleSelectAll}
+                      />
+                    )}
                   </th>
-                  <th>Recipient</th>
+                  <th>{tab === 'batches' ? 'Batch' : 'Recipient'}</th>
                   <th>Created</th>
-                  <th>Status</th>
+                  <th>{tab === 'batches' ? 'Progress' : 'Status'}</th>
                   <th className={styles.actionsCol}>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {isSearchMode
-                  ? pageSearchResults.map((p) => renderRow(p, false))
-                  : pageStreamItems.map((item) =>
-                      item.kind === 'batch' ? (
-                        <BatchGroupRow
-                          key={item.id}
-                          batch={item.batch}
-                          expanded={expandedBatches.has(item.id)}
-                          sending={batchSending.has(item.id)}
-                          onToggle={() => toggleBatch(item.id)}
-                          onSend={(mode) => handleSendBatch(item.id, mode)}
-                          renderRow={renderRow}
-                          formatDate={formatDate}
-                          getRelativeTime={getRelativeTime}
-                        />
-                      ) : (
-                        renderRow(item.password, false)
-                      )
-                    )}
+                {tab === 'batches'
+                  ? pageBatches.map((b) => (
+                      <BatchGroupRow
+                        key={b.id}
+                        batch={b}
+                        sending={batchSending.has(b.id)}
+                        onOpen={() => openBatch(b.id)}
+                        onSend={(mode) => handleSendBatch(b.id, mode)}
+                        formatDate={formatDate}
+                        getRelativeTime={getRelativeTime}
+                      />
+                    ))
+                  : pageLinks.map((p) => renderRow(p, false))}
               </tbody>
             </table>
           )}
@@ -1180,17 +1173,11 @@ export function QueuePage() {
             </div>
             <div className={styles.paginationRight}>
               <span className={styles.itemCount}>
-                {isSearchMode
+                {tab === 'batches'
+                  ? `${activeLength} ${activeLength === 1 ? 'batch' : 'batches'}`
+                  : isSearchMode
                   ? `${activeLength} ${activeLength === 1 ? 'result' : 'results'}`
-                  : (() => {
-                      const batchCount = streamItems.filter((i) => i.kind === 'batch').length;
-                      const linkCount = streamItems.length - batchCount;
-                      return batchCount > 0
-                        ? `${streamItems.length} items · ${batchCount} ${
-                            batchCount === 1 ? 'batch' : 'batches'
-                          }, ${linkCount} ${linkCount === 1 ? 'link' : 'links'}`
-                        : `${linkCount} ${linkCount === 1 ? 'link' : 'links'}`;
-                    })()}
+                  : `${activeLength} ${activeLength === 1 ? 'link' : 'links'}`}
               </span>
             </div>
           </div>
