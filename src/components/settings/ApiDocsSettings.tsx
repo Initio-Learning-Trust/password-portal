@@ -1,11 +1,43 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../common/Card';
+import { Button } from '../common/Button';
 import { useToast } from '../common/Toast';
 import styles from './Settings.module.css';
 
 // Derived from the browser rather than hardcoded, so the examples are correct
 // in whatever environment the portal is being viewed in.
 const BASE = `${window.location.origin}/api`;
+
+/**
+ * Print one section on its own, so the generation reference and the
+ * link-creation reference can go to different people without either handout
+ * carrying the other's contents.
+ *
+ * Works by marking the wanted section and letting the print stylesheet hide
+ * everything else, rather than opening a second window — a popup would lose the
+ * stylesheet and get blocked as often as not. Attributes rather than CSS module
+ * classes because the print rules live in global.css, where hashed class names
+ * are not reachable.
+ */
+function printSection(el: HTMLElement | null): void {
+  if (!el) return;
+
+  el.setAttribute('data-print-target', '');
+  document.body.setAttribute('data-printing', '');
+
+  const cleanup = () => {
+    el.removeAttribute('data-print-target');
+    document.body.removeAttribute('data-printing');
+    window.removeEventListener('afterprint', cleanup);
+  };
+
+  window.addEventListener('afterprint', cleanup);
+  // Safari does not reliably fire afterprint; without this the page would stay
+  // in its printing state and look broken on screen.
+  window.setTimeout(cleanup, 60000);
+
+  window.print();
+}
 
 /** A code sample with a copy button. Every example here is meant to be pasted
  *  into a terminal or handed to an integrator, so all of them get one. */
@@ -30,6 +62,7 @@ function CodeBlock({ children }: { children: string }) {
         className={styles.copyBtn}
         onClick={handleCopy}
         aria-label="Copy to clipboard"
+        data-no-print
       >
         {copied ? 'Copied' : 'Copy'}
       </button>
@@ -39,13 +72,26 @@ function CodeBlock({ children }: { children: string }) {
 }
 
 export function ApiDocsSettings() {
+  const generateRef = useRef<HTMLDivElement>(null);
+  const linksRef = useRef<HTMLDivElement>(null);
+
   return (
     <>
+      <div ref={generateRef}>
+        {/* Shown only on paper, so a printed handout identifies itself. */}
+        <div data-print-only className={styles.printHeader}>
+          <h1>Password Generation API</h1>
+          <p>{BASE}</p>
+        </div>
+
       <Card>
         <CardHeader>
           <CardTitle subtitle="Public endpoints — no authentication required">
             Generating passwords
           </CardTitle>
+          <Button variant="ghost" onClick={() => printSection(generateRef.current)} data-no-print>
+            Print this section
+          </Button>
         </CardHeader>
         <CardContent>
           <div className={styles.apiDocs}>
@@ -161,50 +207,6 @@ curl.exe "${BASE}/password/simple?n=3"`}</CodeBlock>
 
       <Card>
         <CardHeader>
-          <CardTitle subtitle="Requires an API key">Creating a password link</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className={styles.apiDocs}>
-            <p className={styles.helpText}>
-              Creates a one-time link for a password you supply. Create a key
-              under Settings → API Keys. Access can also be restricted by source
-              IP under Settings → IP Whitelist.
-            </p>
-
-            <div className={styles.apiSection}>
-              <h5>Request</h5>
-              <CodeBlock>{`curl -X POST "${BASE}" \\
-  -H "Content-Type: application/json" \\
-  -H "X-API-Key: your-api-key-here" \\
-  -d '{
-    "recipientEmail": "user@example.com",
-    "recipientName": "John Smith",
-    "password": "SecurePassword123",
-    "notes": "Optional internal notes",
-    "sendEmail": false
-  }'`}</CodeBlock>
-              <p className={styles.helpText}>
-                <code>recipientEmail</code> and <code>password</code> are
-                required. Set <code>sendEmail</code> to <code>true</code> to send
-                the notification email as well.
-              </p>
-            </div>
-
-            <div className={styles.apiSection}>
-              <h5>Response</h5>
-              <CodeBlock>{`{
-  "success": true,
-  "id": "uuid-of-password-link",
-  "link": "${window.location.origin}/p/uuid",
-  "status": "pending"
-}`}</CodeBlock>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
           <CardTitle subtitle="Applies to the generation endpoints">Rate limits</CardTitle>
         </CardHeader>
         <CardContent>
@@ -279,6 +281,61 @@ curl.exe "${BASE}/password/simple?n=3"`}</CodeBlock>
           </div>
         </CardContent>
       </Card>
+      </div>
+
+      <div ref={linksRef}>
+        <div data-print-only className={styles.printHeader}>
+          <h1>Password Link API</h1>
+          <p>{BASE}</p>
+        </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle subtitle="Requires an API key">Creating a password link</CardTitle>
+          <Button variant="ghost" onClick={() => printSection(linksRef.current)} data-no-print>
+            Print this section
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <div className={styles.apiDocs}>
+            <p className={styles.helpText}>
+              Creates a one-time link for a password you supply. Create a key
+              under Settings → API Keys. Access can also be restricted by source
+              IP under Settings → IP Whitelist.
+            </p>
+
+            <div className={styles.apiSection}>
+              <h5>Request</h5>
+              <CodeBlock>{`curl -X POST "${BASE}" \\
+  -H "Content-Type: application/json" \\
+  -H "X-API-Key: your-api-key-here" \\
+  -d '{
+    "recipientEmail": "user@example.com",
+    "recipientName": "John Smith",
+    "password": "SecurePassword123",
+    "notes": "Optional internal notes",
+    "sendEmail": false
+  }'`}</CodeBlock>
+              <p className={styles.helpText}>
+                <code>recipientEmail</code> and <code>password</code> are
+                required. Set <code>sendEmail</code> to <code>true</code> to send
+                the notification email as well.
+              </p>
+            </div>
+
+            <div className={styles.apiSection}>
+              <h5>Response</h5>
+              <CodeBlock>{`{
+  "success": true,
+  "id": "uuid-of-password-link",
+  "link": "${window.location.origin}/p/uuid",
+  "status": "pending"
+}`}</CodeBlock>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+      </div>
     </>
   );
 }
