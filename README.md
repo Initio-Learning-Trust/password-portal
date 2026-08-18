@@ -97,15 +97,26 @@ Create API keys for automation tools:
 4. Copy the key immediately - it won't be shown again!
 
 #### IP Whitelist
-Restrict API access to specific IPs:
+Two independent grants, set per entry:
 1. Go to **Settings** → **IP Whitelist**
-2. Add allowed IP addresses or CIDR ranges
+2. Add an IP address or CIDR range
+3. **Generation limit** raises the hourly quota on the public generation
+   endpoints for that address. Blank uses the default.
+4. **Allow password-link creation** grants `POST /api`. Off by default, so
+   raising a quota never widens API access by accident.
+
+If no entry grants API access, `POST /api` accepts any IP — the same behaviour
+as an empty list. See [Operating the API](#operating-the-api); elevated
+generation limits need one-time proxy configuration before they take effect.
 
 #### Word Lists
 Customize the password generator:
 1. Go to **Settings** → **Word Lists**
 2. Add custom word lists (e.g., Animals, Nature, School)
 3. Words are used to generate memorable passwords
+
+These lists feed both the in-app generator and the public generation API. With
+no lists configured, a built-in default list is used.
 
 #### Email Templates
 Customize notification emails:
@@ -136,40 +147,95 @@ View all system activity:
 
 ## API Documentation
 
-### Authentication
-- Header: `X-API-Key: your-api-key`
-- IP must be in the whitelist (if configured)
+Integrator-facing reference: **[docs/API.md](docs/API.md)** — that file is
+written to be sent to third parties as-is.
 
-### Create Password Link
+Summary:
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /api/password/{simple,secure,word4}` | none | Generate passwords |
+| `GET /api/password?style=…` | none | Generate passwords |
+| `GET /api/wordlists` | none | List configured word lists |
+| `GET /api/hasword?word=…` | none | Word membership check |
+| `GET /api/whoami` | API key | Proxy/IP diagnostic (see below) |
+| `POST /api` | API key | Create a password link |
+
+`POST /api` is unchanged from before the generation endpoints were added.
+
+---
+
+## Operating the API
+
+### Rate limits
+
+Generation endpoints are public and rate limited per IP. Configuration is via
+function parameters (set with `firebase functions:config` / `.env` files in
+`functions/`):
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `RATE_LIMIT_PUBLIC_PER_HOUR` | `1000` | Hourly limit for callers not on an elevated tier |
+| `RATE_LIMIT_PROXY_HOPS` | unset | Proxies that append to `X-Forwarded-For` between the client and the function |
+| `RATE_LIMIT_TRUSTED_PROXIES` | unset | CIDR prefixes those proxies come from |
+
+Counters live in the `rate_limits` collection, keyed by a hashed IP and the
+hour. Put a Firestore TTL policy on the `expiresAt` field of that collection so
+they are reclaimed automatically.
+
+The function is capped at `maxInstances: 20`. That cap, not the rate limiter, is
+the hard ceiling on what a distributed abuser can cost you.
+
+### Raising the limit for a specific server
+
+Settings → IP Whitelist. Add the server's address or CIDR range and set
+**Generation limit** to the hourly figure you want. Leave **Allow
+password-link creation** unticked unless that server also needs `POST /api` —
+the two grants are independent.
+
+Changes take up to 5 minutes to reach live traffic (in-process cache).
+
+### Enabling elevated tiers (required once, before the above works)
+
+An elevated limit is granted on the strength of an IP address, so the
+deployment has to be able to identify the caller's IP with confidence.
+`X-Forwarded-For` is append-only — anything a caller sends arrives as a prefix
+— so the trustworthy entry is a fixed number of hops from the *right*, and
+every entry to its right must be a known proxy. Until both values are
+configured, elevated tiers stay off and every caller gets the public limit.
+
+To determine them:
+
+1. From the server you intend to allowlist, call the diagnostic with a valid
+   API key, using the same URL your integration uses:
+
+   ```
+   curl -H "X-API-Key: <key>" https://password.initiolearning.org/api/whoami
+   ```
+
+2. In `candidatesByHopCount`, find the key whose value is that server's real
+   public IP. That number is `RATE_LIMIT_PROXY_HOPS`.
+
+3. Set `RATE_LIMIT_TRUSTED_PROXIES` to CIDR prefixes covering every `chain`
+   entry to the right of it.
+
+4. Redeploy and call `/api/whoami` again. `resolved.trusted` must be `true`
+   and `resolved.ip` must be the server's real address. If `trusted` is
+   `false`, `resolved.reason` says why.
+
+Determine the values against the URL integrators actually use. A caller
+reaching the function by a different route has a different chain, and the
+trusted-proxy check is what stops that route being used to forge an address —
+so do not widen `RATE_LIMIT_TRUSTED_PROXIES` beyond the prefixes you saw in
+step 3.
+
+### Tests
 
 ```
-POST https://europe-west2-password-portal-a7053.cloudfunctions.net/api
-Content-Type: application/json
-X-API-Key: your-api-key
+cd functions && npm run build
+node test-ip-matching.js          # CIDR matching, IP resolution, spoofing cases
+node test-ratelimit-allowlist.js  # needs: firebase emulators:start --only functions,firestore
 ```
-
-**Request:**
-```json
-{
-  "recipientEmail": "user@example.com",
-  "recipientName": "John Smith",
-  "password": "SecurePass123",
-  "notes": "Optional internal notes",
-  "sendEmail": false
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "id": "uuid-here",
-  "link": "https://password.initiolearning.org/p/uuid-here",
-  "status": "pending"
-}
-```
-
-Set `sendEmail: true` to automatically send the notification email.
 
 ---
 
@@ -208,6 +274,16 @@ Cloud Functions secrets:
 PASSWORD_ENCRYPTION_KEY  # 64-character hex string
 SMTP_USER                # Google Workspace email
 SMTP_PASS                # App password
+```
+
+Cloud Functions parameters (`functions/.env`, not secret):
+```
+APP_URL                      # Public site URL used in generated links
+SMTP_HOST                    # Default: smtp.gmail.com
+SMTP_PORT                    # Default: 587
+RATE_LIMIT_PUBLIC_PER_HOUR   # Default: 1000
+RATE_LIMIT_PROXY_HOPS        # Unset. See "Operating the API"
+RATE_LIMIT_TRUSTED_PROXIES   # Unset. See "Operating the API"
 ```
 
 ### Deployment

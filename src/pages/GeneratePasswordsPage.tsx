@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { Layout } from '../components/layout/Layout';
 import { Card, CardContent } from '../components/common/Card';
@@ -19,6 +19,14 @@ function generateBatchPasswords(count: number, mode: PasswordMode): GeneratedPas
   }));
 }
 
+// Single source of truth for how each style is described. The hero card and
+// the batch chooser both render from this, so they cannot drift apart.
+const MODES: { id: PasswordMode; name: string; example: string; desc: string }[] = [
+  { id: 'simple', name: 'Simple', example: 'TreeBridge47', desc: 'Easy to remember' },
+  { id: 'secure', name: 'Secure', example: 'Movie3Cartoon)Bottle', desc: 'Higher entropy' },
+  { id: 'word4', name: 'Word + 4 digits', example: 'Tiger4829', desc: 'Short and simple' },
+];
+
 const COUNT_PRESETS = [5, 10, 25, 50, 100];
 const MIN_COUNT = 1;
 const MAX_COUNT = 1000;
@@ -34,6 +42,44 @@ export function GeneratePasswordsPage() {
   const [isGenerating, setIsGenerating] = useState(false);
 
   const hasResults = passwords.length > 0;
+
+  // Click-to-generate hero. Seeded on first render so the page always opens
+  // with a usable password rather than an empty placeholder. Generated locally
+  // rather than through the API: a reroll should feel instant, and there is no
+  // reason to spend a network round-trip on something that takes microseconds.
+  const [hero, setHero] = useState(() => generatePassword({ mode: 'simple' }));
+  const [heroCopied, setHeroCopied] = useState(false);
+  const heroCopyTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => () => window.clearTimeout(heroCopyTimer.current), []);
+
+  const rerollHero = useCallback((nextMode: PasswordMode) => {
+    setHero(generatePassword({ mode: nextMode }));
+    setHeroCopied(false);
+    window.clearTimeout(heroCopyTimer.current);
+  }, []);
+
+  // Style selection is shared: picking a style anywhere on the page updates
+  // both the hero and the batch controls, and rerolls the hero so what is on
+  // screen always matches the selected style.
+  const selectMode = useCallback(
+    (next: PasswordMode) => {
+      setMode(next);
+      rerollHero(next);
+    },
+    [rerollHero]
+  );
+
+  const handleCopyHero = async () => {
+    try {
+      await navigator.clipboard.writeText(hero);
+      setHeroCopied(true);
+      window.clearTimeout(heroCopyTimer.current);
+      heroCopyTimer.current = window.setTimeout(() => setHeroCopied(false), 1500);
+    } catch {
+      showToast('Failed to copy', 'error');
+    }
+  };
 
   const handleGenerate = () => {
     setIsGenerating(true);
@@ -172,9 +218,63 @@ export function GeneratePasswordsPage() {
           <header className={styles.header}>
             <h1 className={styles.title}>Password Generator</h1>
             <p className={styles.subtitle}>
-              Generate a batch of passwords, then copy them into a spreadsheet or paste individually.
+              Click for a single password, or generate a batch and copy them into a spreadsheet.
             </p>
           </header>
+
+          <Card className={styles.heroCard}>
+            <CardContent>
+              <div className={styles.hero}>
+                <button
+                  type="button"
+                  className={styles.heroPassword}
+                  onClick={handleCopyHero}
+                  aria-label={`Copy password ${hero}`}
+                >
+                  <AnimatePresence mode="wait" initial={false}>
+                    <motion.span
+                      key={hero}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -8 }}
+                      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+                    >
+                      {hero}
+                    </motion.span>
+                  </AnimatePresence>
+                </button>
+
+                {/* Announces each new password, and the copy confirmation, to
+                    screen readers without stealing focus. */}
+                <p className={styles.heroStatus} aria-live="polite">
+                  {heroCopied ? 'Copied to clipboard' : 'Click the password to copy it'}
+                </p>
+
+                <Button variant="primary" onClick={() => rerollHero(mode)}>
+                  Another password, please
+                </Button>
+
+                <div
+                  className={styles.heroStyles}
+                  role="radiogroup"
+                  aria-label="Password style"
+                >
+                  {MODES.map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={mode === m.id}
+                      className={`${styles.heroStyleBtn} ${mode === m.id ? styles.heroStyleActive : ''}`}
+                      onClick={() => selectMode(m.id)}
+                    >
+                      {m.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
 
           <motion.div layout transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}>
             <Card className={styles.controlsCard}>
@@ -268,39 +368,20 @@ export function GeneratePasswordsPage() {
                   <div className={styles.fieldMode}>
                     <span className={styles.label}>Password style</span>
                     <div className={styles.modeButtons} role="radiogroup" aria-label="Password style">
-                      <button
-                        type="button"
-                        role="radio"
-                        aria-checked={mode === 'simple'}
-                        className={`${styles.modeBtn} ${mode === 'simple' ? styles.modeActive : ''}`}
-                        onClick={() => setMode('simple')}
-                      >
-                        <span className={styles.modeName}>Simple</span>
-                        <span className={styles.modeExample}>TreeBridge47</span>
-                        <span className={styles.modeDesc}>Easy to remember</span>
-                      </button>
-                      <button
-                        type="button"
-                        role="radio"
-                        aria-checked={mode === 'secure'}
-                        className={`${styles.modeBtn} ${mode === 'secure' ? styles.modeActive : ''}`}
-                        onClick={() => setMode('secure')}
-                      >
-                        <span className={styles.modeName}>Secure</span>
-                        <span className={styles.modeExample}>Movie3Cartoon)Bottle</span>
-                        <span className={styles.modeDesc}>Higher entropy</span>
-                      </button>
-                      <button
-                        type="button"
-                        role="radio"
-                        aria-checked={mode === 'word4'}
-                        className={`${styles.modeBtn} ${mode === 'word4' ? styles.modeActive : ''}`}
-                        onClick={() => setMode('word4')}
-                      >
-                        <span className={styles.modeName}>Word + 4 digits</span>
-                        <span className={styles.modeExample}>Tiger4829</span>
-                        <span className={styles.modeDesc}>Short and simple</span>
-                      </button>
+                      {MODES.map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={mode === m.id}
+                          className={`${styles.modeBtn} ${mode === m.id ? styles.modeActive : ''}`}
+                          onClick={() => selectMode(m.id)}
+                        >
+                          <span className={styles.modeName}>{m.name}</span>
+                          <span className={styles.modeExample}>{m.example}</span>
+                          <span className={styles.modeDesc}>{m.desc}</span>
+                        </button>
+                      ))}
                     </div>
                   </div>
                 </div>

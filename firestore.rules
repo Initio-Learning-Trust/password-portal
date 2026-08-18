@@ -69,6 +69,13 @@ service cloud.firestore {
       allow read, write: if isAdmin();
     }
 
+    // Rate limit counters - written only by Cloud Functions via the Admin SDK.
+    // Nothing in the client needs these, and client write access would let a
+    // caller reset their own quota.
+    match /rate_limits/{bucketId} {
+      allow read, write: if false;
+    }
+
     // Word Lists collection
     match /word_lists/{listId} {
       // Technicians can read
