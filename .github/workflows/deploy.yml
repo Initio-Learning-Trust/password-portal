@@ -1,13 +1,17 @@
 name: Deploy to Firebase
 
-# Disabled: the build secrets aren't fully wired up, so CI-deployed bundles
-# ship with empty Firebase config and crash with auth/invalid-api-key in prod.
-# Deploys are being done manually from the dev environment via
-# `firebase deploy --only hosting`. Re-enable by restoring the `push` /
-# `pull_request` triggers once the GitHub secrets (FIREBASE_API_KEY,
-# FIREBASE_AUTH_DOMAIN, etc.) are set on the repo.
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
+
+# One deploy at a time. Two overlapping runs could interleave hosting and
+# functions from different commits and leave the site calling an API that
+# hasn't shipped yet.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -49,6 +53,60 @@ jobs:
       - name: Type check frontend
         run: npx tsc --noEmit
 
+      - name: Test IP and CIDR matching
+        run: node test-ip-matching.js
+        working-directory: functions
+
+      # Reports whether the deploy secrets are configured, without failing.
+      # Merging to main is otherwise the first moment anyone finds out, and
+      # the answer arrives as a failed production deploy. Informational here
+      # because pull requests opened from a fork never receive secrets; the
+      # deploy job enforces the same list for real.
+      - name: Report deployment secret status
+        env:
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
+          FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          ALLOWED_DOMAIN: ${{ secrets.ALLOWED_DOMAIN }}
+          APP_URL: ${{ secrets.APP_URL }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          missing=""
+          for name in FIREBASE_API_KEY FIREBASE_AUTH_DOMAIN FIREBASE_PROJECT_ID \
+                      FIREBASE_STORAGE_BUCKET FIREBASE_MESSAGING_SENDER_ID \
+                      FIREBASE_APP_ID ALLOWED_DOMAIN APP_URL \
+                      FIREBASE_SERVICE_ACCOUNT; do
+            if [ -z "${!name}" ]; then
+              missing="$missing $name"
+              echo "  missing  $name"
+            else
+              echo "  set      $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::Not set:$missing — a merge to main would fail at the deploy guard."
+          else
+            echo "All nine secrets are set. A merge to main will deploy."
+          fi
+
+      # The bundle only carries Firebase config if the secrets reached the
+      # build. Reported here so a mapping mistake surfaces on the pull request
+      # rather than as a broken production site.
+      - name: Report whether the bundle carries Firebase config
+        env:
+          EXPECTED_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+        run: |
+          if [ -z "$EXPECTED_API_KEY" ]; then
+            echo "::warning::FIREBASE_API_KEY is not set, cannot check the bundle."
+          elif grep -rqF "$EXPECTED_API_KEY" dist/assets; then
+            echo "Bundle contains the injected Firebase API key."
+          else
+            echo "::warning::Bundle does not contain the Firebase API key — the deploy guard would stop a merge."
+          fi
+
   deploy:
     needs: build
     runs-on: ubuntu-latest
@@ -57,6 +115,40 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # This workflow was previously disabled because deploys ran with the
+      # repository secrets unset, producing a bundle with empty Firebase config
+      # that crashed in production with auth/invalid-api-key. Failing here is
+      # the point: a missing secret must stop the deploy, not ship a broken
+      # site that only fails once a user opens it.
+      - name: Verify deployment secrets are configured
+        env:
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
+          FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          ALLOWED_DOMAIN: ${{ secrets.ALLOWED_DOMAIN }}
+          APP_URL: ${{ secrets.APP_URL }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          missing=""
+          for name in FIREBASE_API_KEY FIREBASE_AUTH_DOMAIN FIREBASE_PROJECT_ID \
+                      FIREBASE_STORAGE_BUCKET FIREBASE_MESSAGING_SENDER_ID \
+                      FIREBASE_APP_ID ALLOWED_DOMAIN APP_URL \
+                      FIREBASE_SERVICE_ACCOUNT; do
+            if [ -z "${!name}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing"
+            echo "Set them under Settings -> Secrets and variables -> Actions."
+            echo "Deploy stopped so a bundle with empty Firebase config is not published."
+            exit 1
+          fi
+          echo "All required secrets are present."
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -79,6 +171,23 @@ jobs:
           VITE_ALLOWED_DOMAIN: ${{ secrets.ALLOWED_DOMAIN }}
           VITE_APP_URL: ${{ secrets.APP_URL }}
 
+      # Guards against a build that succeeded but produced an unusable bundle,
+      # which is the exact failure this workflow was disabled for. Checks the
+      # API key specifically: it is the value whose absence produces
+      # auth/invalid-api-key, and unlike the project ID it appears nowhere in
+      # the source, so finding it proves the build really did inject config.
+      - name: Verify built bundle carries Firebase config
+        env:
+          EXPECTED_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+        run: |
+          if grep -rqF "$EXPECTED_API_KEY" dist/assets; then
+            echo "Bundle contains the injected Firebase API key."
+          else
+            echo "::error::Built bundle does not contain the Firebase API key."
+            echo "The frontend build did not pick up the VITE_FIREBASE_* values."
+            exit 1
+          fi
+
       - name: Install functions dependencies
         run: npm ci
         working-directory: functions
@@ -87,18 +196,13 @@ jobs:
         run: npm run build
         working-directory: functions
 
-      - name: Deploy to Firebase
-        uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          channelId: live
-          projectId: ${{ secrets.FIREBASE_PROJECT_ID }}
-
-      - name: Deploy Cloud Functions
+      # Hosting, functions and rules go out in one invocation. Deployed
+      # separately they can drift: the site can end up calling an API that
+      # hasn't shipped, or functions can run against stale security rules.
+      - name: Deploy hosting, functions and Firestore rules
         uses: w9jds/firebase-action@v13.5.2
         with:
-          args: deploy --only functions
+          args: deploy --only hosting,functions,firestore:rules
         env:
           GCP_SA_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}

@@ -5,6 +5,15 @@ import { v4 as uuidv4 } from 'uuid';
 import * as nodemailer from 'nodemailer';
 import { encryptPassword, decryptPassword, hashApiKey, generateApiKey } from './utils/encryption';
 import { buildSearchTokens } from './utils/searchTokens';
+import type { Request } from 'firebase-functions/v2/https';
+import type { Response } from 'express';
+import { Timestamp } from 'firebase-admin/firestore';
+import { normalizeIp, parseCidrList } from './utils/cidr';
+import { resolveClient, type ProxyConfig, type ResolvedClient } from './utils/clientIp';
+import { bucketKey, consume, rateLimitHeaders } from './utils/rateLimit';
+import { checkApiAccess, findEntry } from './utils/allowlist';
+import { generateMany, isPasswordMode, PASSWORD_MODES, type PasswordMode } from './utils/passwordGenerator';
+import { hasWord, listNames, resolveWords } from './utils/wordLists';
 
 // Initialize Firebase Admin
 admin.initializeApp();
@@ -19,6 +28,13 @@ const smtpUser = defineSecret('SMTP_USER');
 const smtpPass = defineSecret('SMTP_PASS');
 const smtpHost = defineString('SMTP_HOST', { default: 'smtp.gmail.com' });
 const smtpPort = defineString('SMTP_PORT', { default: '587' });
+
+// Rate limiting / proxy trust. See docs/API.md "Operating the API" for how to
+// determine the two proxy values; until they are set, elevated allowlist tiers
+// stay disabled and every caller receives the public limit.
+const rateLimitPublic = defineString('RATE_LIMIT_PUBLIC_PER_HOUR', { default: '1000' });
+const rateLimitProxyHops = defineString('RATE_LIMIT_PROXY_HOPS', { default: '' });
+const rateLimitTrustedProxies = defineString('RATE_LIMIT_TRUSTED_PROXIES', { default: '' });
 
 // Types
 interface PasswordDoc {
@@ -508,15 +524,389 @@ export const regeneratePasswordLink = onCall(
 /**
  * External API for creating password links (for Salamander automation)
  */
-export const api = onRequest(
-  { region: 'europe-west2', cors: false, secrets: [encryptionKey, smtpUser, smtpPass] },
-  async (req, res) => {
-    // Only allow POST for creating passwords
-    if (req.method !== 'POST') {
-      res.status(405).json({ error: 'Method not allowed' });
+// ==================== Public generation API ====================
+
+/** Largest `n` accepted on a single generation request. */
+const MAX_BATCH = 100;
+
+/** Hourly quota applied when the caller is not on an elevated allowlist tier. */
+const FALLBACK_PUBLIC_LIMIT = 1000;
+
+/**
+ * Proxy trust configuration, parsed once per instance. Deployment-specific and
+ * therefore configured rather than assumed — see docs/API.md.
+ */
+let proxyConfigCache: { raw: string; config: ProxyConfig } | null = null;
+
+function getProxyConfig(): ProxyConfig {
+  const hopsRaw = rateLimitProxyHops.value().trim();
+  const proxiesRaw = rateLimitTrustedProxies.value().trim();
+  const raw = `${hopsRaw}|${proxiesRaw}`;
+  if (proxyConfigCache && proxyConfigCache.raw === raw) return proxyConfigCache.config;
+
+  const hops = /^\d+$/.test(hopsRaw) ? Number(hopsRaw) : null;
+  const config: ProxyConfig = { hops, trustedProxies: parseCidrList(proxiesRaw) };
+  proxyConfigCache = { raw, config };
+
+  if (hops === null && hopsRaw !== '') {
+    console.warn(`RATE_LIMIT_PROXY_HOPS="${hopsRaw}" is not a number; elevated tiers disabled`);
+  }
+  return config;
+}
+
+function getPublicLimit(): number {
+  const raw = rateLimitPublic.value().trim();
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : FALLBACK_PUBLIC_LIMIT;
+}
+
+/**
+ * Reduce the request path to a route key. Firebase Hosting forwards the full
+ * `/api/...` path while the direct function URL omits the prefix, so strip it
+ * and normalise the edges.
+ */
+function routePath(rawPath: string): string {
+  let path = (rawPath || '/').split('?')[0];
+  if (path === '/api' || path.startsWith('/api/')) path = path.slice(4);
+  path = path.replace(/\/+$/, '');
+  return path === '' ? '/' : path;
+}
+
+function firstQueryValue(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+  return undefined;
+}
+
+type Format = 'text' | 'json';
+
+interface BadRequest {
+  error: string;
+}
+
+function parseCount(raw: string | undefined): number | BadRequest {
+  if (raw === undefined || raw === '') return 1;
+  if (!/^\d+$/.test(raw)) return { error: 'n must be a whole number' };
+  const n = Number(raw);
+  if (n < 1 || n > MAX_BATCH) return { error: `n must be between 1 and ${MAX_BATCH}` };
+  return n;
+}
+
+function parseFormat(raw: string | undefined): Format | BadRequest {
+  if (raw === undefined || raw === '') return 'text';
+  if (raw === 'text' || raw === 'json') return raw;
+  return { error: "format must be 'text' or 'json'" };
+}
+
+function isBadRequest(value: unknown): value is BadRequest {
+  return typeof value === 'object' && value !== null && 'error' in value;
+}
+
+/** CORS for the read-only public routes. */
+function setCors(res: Response): void {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'X-API-Key, Content-Type');
+  res.set('Access-Control-Max-Age', '3600');
+}
+
+/** Throttle events already audited by this instance, to keep 429s from flooding audit_logs. */
+const auditedThrottles = new Set<string>();
+
+async function auditThrottle(client: ResolvedClient, limit: number, resetAt: number): Promise<void> {
+  const marker = `${client.key ?? 'unresolved'}_${resetAt}`;
+  if (auditedThrottles.has(marker)) return;
+  if (auditedThrottles.size > 5000) auditedThrottles.clear();
+  auditedThrottles.add(marker);
+
+  try {
+    await db.collection('audit_logs').add({
+      action: 'rate_limit_exceeded',
+      details: { limit, resetAt, trusted: client.trusted },
+      ip: client.ip,
+      timestamp: Timestamp.now(),
+    });
+  } catch (error) {
+    console.error('Failed to write rate limit audit entry:', error);
+  }
+}
+
+interface Throttled {
+  client: ResolvedClient;
+  ok: boolean;
+}
+
+/**
+ * Resolve the caller, pick their tier, and record the request.
+ *
+ * Elevated quota requires a *trusted* resolution. An address we cannot vouch
+ * for still gets counted — it just never gets promoted, so forging
+ * X-Forwarded-For buys nothing.
+ */
+async function applyRateLimit(req: Request, res: Response): Promise<Throttled> {
+  const client = resolveClient(req, getProxyConfig());
+  let limit = getPublicLimit();
+
+  if (client.trusted) {
+    try {
+      const entry = await findEntry(db, client.ip);
+      if (entry?.generateLimit) limit = entry.generateLimit;
+    } catch (error) {
+      // Allowlist unavailable: serve the public limit rather than fail.
+      console.error('Allowlist lookup failed; applying public limit:', error);
+    }
+  }
+
+  const decision = await consume(db, bucketKey(client.key ?? 'unresolved'), limit);
+  res.set(rateLimitHeaders(decision));
+
+  if (!decision.allowed) {
+    await auditThrottle(client, limit, decision.resetAt);
+    res.status(429).json({
+      error: 'Rate limit exceeded',
+      limit,
+      retryAfter: decision.retryAfter,
+    });
+    return { client, ok: false };
+  }
+
+  return { client, ok: true };
+}
+
+async function handleGeneratePasswords(
+  req: Request,
+  res: Response,
+  mode: PasswordMode
+): Promise<void> {
+  const count = parseCount(firstQueryValue(req.query.n));
+  if (isBadRequest(count)) {
+    res.status(400).json(count);
+    return;
+  }
+
+  const format = parseFormat(firstQueryValue(req.query.format));
+  if (isBadRequest(format)) {
+    res.status(400).json(format);
+    return;
+  }
+
+  const requestedList = firstQueryValue(req.query.list);
+  const selection = await resolveWords(db, requestedList);
+  if (selection.notFound) {
+    res.status(404).json({ error: `Unknown word list: ${requestedList}` });
+    return;
+  }
+
+  const passwords = generateMany(count, { mode, words: selection.words });
+
+  // Generated credentials must never be cached by a proxy or the browser.
+  res.set('Cache-Control', 'no-store');
+
+  if (format === 'json') {
+    res.status(200).json({
+      passwords,
+      count: passwords.length,
+      type: mode,
+      ...(selection.listName ? { list: selection.listName } : {}),
+    });
+    return;
+  }
+
+  res.status(200).type('text/plain').send(passwords.join('\n'));
+}
+
+async function handleHasWord(req: Request, res: Response): Promise<void> {
+  const word = firstQueryValue(req.query.word);
+  if (!word) {
+    res.status(400).json({ error: 'word is required' });
+    return;
+  }
+
+  const format = parseFormat(firstQueryValue(req.query.format));
+  if (isBadRequest(format)) {
+    res.status(400).json(format);
+    return;
+  }
+
+  const found = await hasWord(db, word);
+  if (format === 'json') {
+    res.status(200).json({ word, found });
+    return;
+  }
+  res.status(200).type('text/plain').send(String(found));
+}
+
+async function handleWordLists(res: Response): Promise<void> {
+  const names = await listNames(db);
+  res.status(200).json({ lists: names, count: names.length });
+}
+
+function handleIndex(res: Response): void {
+  res.status(200).json({
+    endpoints: {
+      'GET /api/password/simple': 'Word + Word + 2 digits, e.g. TreeBridge47',
+      'GET /api/password/secure': 'Word + digit + Word + symbol + Word, e.g. Movie3Cartoon)Bottle',
+      'GET /api/password/word4': 'Word + 4 digits, e.g. Tiger4829',
+      'GET /api/password': "As above, with ?style=simple|secure|word4",
+      'GET /api/hasword': 'Is ?word= present in the configured word lists',
+      'GET /api/wordlists': 'Names of the configured word lists',
+      'POST /api': 'Create a password link (requires X-API-Key)',
+    },
+    parameters: {
+      n: `1-${MAX_BATCH}, default 1`,
+      format: 'text (default) or json',
+      list: 'optional word list name',
+    },
+    documentation: `${appUrl.value()}/docs/api`,
+  });
+}
+
+/**
+ * Diagnostic that reports how this deployment sees the request chain, so an
+ * operator can determine the correct RATE_LIMIT_PROXY_HOPS and
+ * RATE_LIMIT_TRUSTED_PROXIES values.
+ *
+ * Requires an API key: the response exposes the internal proxy addresses. It
+ * deliberately skips the IP allowlist, since its whole purpose is configuring
+ * the IP handling that gate depends on.
+ */
+async function handleWhoami(req: Request, res: Response): Promise<void> {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey || typeof apiKey !== 'string') {
+    res.status(401).json({ error: 'API key required' });
+    return;
+  }
+
+  const keysSnapshot = await db
+    .collection('api_keys')
+    .where('keyHash', '==', hashApiKey(apiKey))
+    .where('active', '==', true)
+    .get();
+
+  if (keysSnapshot.empty) {
+    res.status(401).json({ error: 'Invalid API key' });
+    return;
+  }
+
+  const config = getProxyConfig();
+  const client = resolveClient(req, config);
+
+  // What each candidate hop count would resolve to, so the correct value can
+  // be read straight off the response.
+  const candidates: Record<string, string> = {};
+  for (let hops = 0; hops < client.chain.length; hops++) {
+    candidates[String(hops)] = client.chain[client.chain.length - 1 - hops];
+  }
+
+  res.status(200).json({
+    resolved: { ip: client.ip, trusted: client.trusted, reason: client.reason ?? null },
+    chain: client.chain,
+    socketAddress: normalizeIp(String(req.ip || '')) ?? null,
+    candidatesByHopCount: candidates,
+    configured: {
+      hops: config.hops,
+      trustedProxies: config.trustedProxies.map((cidr) => cidr.source),
+      publicLimitPerHour: getPublicLimit(),
+    },
+    hint:
+      client.chain.length === 0
+        ? 'No X-Forwarded-For header was present on this request.'
+        : 'Set RATE_LIMIT_PROXY_HOPS to the key in candidatesByHopCount whose value is your real client IP, and RATE_LIMIT_TRUSTED_PROXIES to the prefixes covering every entry to its right.',
+  });
+}
+
+async function handleGet(path: string, req: Request, res: Response): Promise<void> {
+  setCors(res);
+
+  if (path === '/whoami') {
+    await handleWhoami(req, res);
+    return;
+  }
+
+  const throttle = await applyRateLimit(req, res);
+  if (!throttle.ok) return;
+
+  if (path === '/') {
+    handleIndex(res);
+    return;
+  }
+  if (path === '/hasword') {
+    await handleHasWord(req, res);
+    return;
+  }
+  if (path === '/wordlists') {
+    await handleWordLists(res);
+    return;
+  }
+
+  if (path === '/password') {
+    const style = firstQueryValue(req.query.style) ?? 'simple';
+    if (!isPasswordMode(style)) {
+      res.status(400).json({ error: `style must be one of: ${PASSWORD_MODES.join(', ')}` });
       return;
     }
+    await handleGeneratePasswords(req, res, style);
+    return;
+  }
 
+  const match = /^\/password\/([a-z0-9]+)$/.exec(path);
+  if (match) {
+    const style = match[1];
+    if (!isPasswordMode(style)) {
+      res.status(404).json({ error: `Unknown password style: ${style}` });
+      return;
+    }
+    await handleGeneratePasswords(req, res, style);
+    return;
+  }
+
+  res.status(404).json({ error: 'Not found' });
+}
+
+/**
+ * Single HTTP entry point. Firebase Hosting rewrites /api/** here, and the
+ * function is also reachable at its own URL.
+ */
+export const api = onRequest(
+  {
+    region: 'europe-west2',
+    cors: false,
+    maxInstances: 20,
+    secrets: [encryptionKey, smtpUser, smtpPass],
+  },
+  async (req, res) => {
+    const path = routePath(req.path);
+
+    try {
+      if (req.method === 'OPTIONS') {
+        setCors(res);
+        res.status(204).send('');
+        return;
+      }
+
+      if (req.method === 'GET') {
+        await handleGet(path, req, res);
+        return;
+      }
+
+      if (req.method === 'POST' && path === '/') {
+        await handleCreateLink(req, res);
+        return;
+      }
+
+      res.status(405).json({ error: 'Method not allowed' });
+    } catch (error) {
+      console.error(`Unhandled error on ${req.method} ${path}:`, error);
+      if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+/**
+ * POST /api - create a password link. Unchanged behaviour: API key required,
+ * IP allowlist enforced when one is configured.
+ */
+async function handleCreateLink(req: Request, res: Response): Promise<void> {
     // Check API key
     const apiKey = req.headers['x-api-key'];
     if (!apiKey || typeof apiKey !== 'string') {
@@ -541,13 +931,43 @@ export const api = onRequest(
       const apiKeyDoc = keysSnapshot.docs[0];
       const apiKeyData = apiKeyDoc.data();
 
-      // Check IP whitelist
-      const clientIP = req.ip || req.headers['x-forwarded-for'] || 'unknown';
-      const whitelistSnapshot = await db.collection('ip_whitelist').get();
-      const allowedIPs = whitelistSnapshot.docs.map((doc) => doc.data().ip);
+      // Check IP allowlist. Entries now support CIDR prefixes, and only those
+      // with allowApi grant access here.
+      //
+      // The gate tests every address this request could plausibly be
+      // attributed to, not just the strictly-resolved one. Before CIDR support
+      // this check compared against `req.ip || x-forwarded-for`, so existing
+      // allowlist rows were written to match whatever that produced; narrowing
+      // to a single resolution would lock out working integrations on deploy.
+      // That is acceptable here and only here: this endpoint is already
+      // authenticated by API key, so the IP test is defence in depth rather
+      // than the primary control. The generation endpoints, where an IP alone
+      // grants elevated quota, use the strict resolution only.
+      const resolved = resolveClient(req, getProxyConfig());
+      const clientIP = resolved.ip;
+      const candidates = Array.from(
+        new Set(
+          [
+            resolved.ip,
+            normalizeIp(String(req.ip || '')),
+            resolved.chain[0],
+            resolved.chain[resolved.chain.length - 1],
+          ].filter((candidate): candidate is string => !!candidate)
+        )
+      );
 
-      // If whitelist exists, check IP
-      if (allowedIPs.length > 0 && !allowedIPs.includes(clientIP as string)) {
+      let gateConfigured = false;
+      let gateAllowed = false;
+      for (const candidate of candidates) {
+        const gate = await checkApiAccess(db, candidate);
+        gateConfigured = gate.configured;
+        if (!gate.configured || gate.allowed) {
+          gateAllowed = true;
+          break;
+        }
+      }
+
+      if (gateConfigured && !gateAllowed) {
         res.status(403).json({ error: 'IP not whitelisted' });
         return;
       }
@@ -576,20 +996,20 @@ export const api = onRequest(
         notes: notes || '',
         createdBy: 'api',
         createdByEmail: `API: ${apiKeyData.name}`,
-        createdAt: admin.firestore.Timestamp.now(),
+        createdAt: Timestamp.now(),
         status: sendEmail ? 'sent' : 'pending',
         emailSent: !!sendEmail,
         source: 'api',
         apiKeyId: apiKeyDoc.id,
         searchTokens: buildSearchTokens(recipientEmail, recipientName),
-        ...(sendEmail && { emailSentAt: admin.firestore.Timestamp.now() }),
+        ...(sendEmail && { emailSentAt: Timestamp.now() }),
       };
 
       await db.collection('passwords').doc(linkId).set(passwordDoc);
 
       // Update API key last used
       await apiKeyDoc.ref.update({
-        lastUsed: admin.firestore.Timestamp.now(),
+        lastUsed: Timestamp.now(),
       });
 
       // Create audit log
@@ -603,7 +1023,7 @@ export const api = onRequest(
           action: 'create',
         },
         ip: clientIP as string,
-        timestamp: admin.firestore.Timestamp.now(),
+        timestamp: Timestamp.now(),
       });
 
       const link = `${appUrl.value()}/p/${linkId}`;
@@ -671,8 +1091,7 @@ export const api = onRequest(
       console.error('API error:', error);
       res.status(500).json({ error: 'Internal server error' });
     }
-  }
-);
+}
 
 // ==================== Admin Functions ====================
 

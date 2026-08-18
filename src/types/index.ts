@@ -67,8 +67,20 @@ export interface ApiKeyDoc {
 
 export interface IpWhitelistDoc {
   id: string;
+  /** A single address or a CIDR prefix, e.g. "10.0.0.0/24". */
   ip: string;
   description: string;
+  /**
+   * Grants POST /api (password-link creation). Absent on entries created
+   * before generation quotas existed, and those were all added to grant API
+   * access, so undefined is treated as true.
+   */
+  allowApi?: boolean;
+  /**
+   * Hourly quota for the public generation endpoints. Null or absent means the
+   * default public limit applies.
+   */
+  generateLimit?: number | null;
   createdBy: string;
   createdByEmail: string;
   createdAt: Date;
