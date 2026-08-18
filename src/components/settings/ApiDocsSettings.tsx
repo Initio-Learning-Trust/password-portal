@@ -66,7 +66,7 @@ function CodeBlock({ children }: { children: string }) {
       >
         {copied ? 'Copied' : 'Copy'}
       </button>
-      <code className={styles.codeBlock}>{children}</code>
+      <code className={styles.codeBlock} data-code-block>{children}</code>
     </div>
   );
 }

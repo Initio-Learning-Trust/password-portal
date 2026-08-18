@@ -207,6 +207,10 @@ input, textarea, select {
    hidden so the generation reference and the link-creation reference can be
    handed to different people separately.
 
+   The handout is meant to look like the page it came from, so this stylesheet
+   only removes what is meaningless on paper — nav, copy buttons — and does not
+   restyle the content.
+
    Uses visibility rather than display so the target keeps its layout, then
    pulls it to the top of the page — hiding ancestors with display:none would
    take the target down with them.
@@ -244,24 +248,46 @@ input, textarea, select {
     margin: 0;
   }
 
-  /* Browsers drop background colours by default, so the dark code blocks would
-     print as near-invisible light-grey text. Invert them for paper. */
-  body[data-printing] [data-print-target] code {
+  /* The app's page background is a light grey. On screen it sits behind the
+     cards; on paper it washes every sheet and leaves a grey slab under the
+     last page's content, which reads as a rendering fault. The cards supply
+     their own backgrounds, so the page itself prints white. */
+  body[data-printing] {
     background: #ffffff !important;
-    color: #000000 !important;
-    border: 1px solid #999999;
   }
 
-  /* Keep examples and their headings from splitting across pages. */
-  body[data-printing] [data-print-target] h5,
-  body[data-printing] [data-print-target] table {
-    break-inside: avoid;
+  /* Browsers drop background colours from printed output unless asked not to.
+     Without this the dark code blocks lose their background but keep their
+     light text, printing as near-invisible grey — so the colours are forced
+     rather than the blocks being restyled for paper. */
+  body[data-printing] [data-print-target],
+  body[data-printing] [data-print-target] * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 
-  body[data-printing] [data-print-target] code {
+  /* Only the sample blocks; inline <code> is unstyled on screen and must stay
+     that way on paper. */
+  body[data-printing] [data-print-target] [data-code-block] {
     break-inside: avoid;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  /* Keep a heading with the content it introduces, and keep table rows whole.
+     Avoiding breaks on whole tables instead would push a tall table to the
+     next page and leave most of a page blank. */
+  body[data-printing] [data-print-target] h4,
+  body[data-printing] [data-print-target] h5 {
+    break-after: avoid;
+  }
+
+  body[data-printing] [data-print-target] tr {
+    break-inside: avoid;
+  }
+
+  body[data-printing] [data-print-target] thead {
+    display: table-header-group;
   }
 
   @page {
