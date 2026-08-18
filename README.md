@@ -298,6 +298,11 @@ again if the built bundle does not contain the injected Firebase API key. Both
 checks exist because an earlier version of this workflow shipped bundles with
 empty config that crashed in production with `auth/invalid-api-key`.
 
+The deploy step pins `firebase-tools` explicitly. That version must support the
+Node runtime in `functions/package.json` — a firebase-tools older than the
+runtime rejects the `engines` field outright and deploys nothing. If you raise
+the functions runtime, raise the pinned CLI version with it.
+
 Required repository secrets (Settings → Secrets and variables → Actions):
 
 ```
