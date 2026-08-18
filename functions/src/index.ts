@@ -613,6 +613,9 @@ function setCors(res: Response): void {
 /** Throttle events already audited by this instance, to keep 429s from flooding audit_logs. */
 const auditedThrottles = new Set<string>();
 
+/** Emitted once per instance so the log records it without repeating per request. */
+let warnedUntrusted = false;
+
 async function auditThrottle(client: ResolvedClient, limit: number, resetAt: number): Promise<void> {
   const marker = `${client.key ?? 'unresolved'}_${resetAt}`;
   if (auditedThrottles.has(marker)) return;
@@ -645,6 +648,22 @@ interface Throttled {
  */
 async function applyRateLimit(req: Request, res: Response): Promise<Throttled> {
   const client = resolveClient(req, getProxyConfig());
+
+  // Without trusted proxy configuration the caller cannot be identified, so
+  // counters key off whichever proxy address terminated the request. That
+  // address varies between requests, which fragments the buckets and leaves
+  // the public limit effectively unenforced. Elevated tiers are off in this
+  // state by design, but the limit being soft is worth saying out loud.
+  if (!client.trusted && !warnedUntrusted) {
+    warnedUntrusted = true;
+    console.warn(
+      `Rate limiting is running without trusted proxy configuration (${client.reason}). ` +
+        'Counters may fragment across requests and the public limit will not be reliably ' +
+        'enforced. Set RATE_LIMIT_PROXY_HOPS and RATE_LIMIT_TRUSTED_PROXIES — see the ' +
+        '"Operating the API" section of the README.'
+    );
+  }
+
   let limit = getPublicLimit();
 
   if (client.trusted) {
@@ -757,7 +776,7 @@ function handleIndex(res: Response): void {
       format: 'text (default) or json',
       list: 'optional word list name',
     },
-    documentation: `${appUrl.value()}/docs/api`,
+    documentation: 'Settings > API Docs in the Password Portal',
   });
 }
 

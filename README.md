@@ -198,6 +198,12 @@ Changes take up to 5 minutes to reach live traffic (in-process cache).
 
 ### Enabling elevated tiers (required once, before the above works)
 
+**This configuration gates rate limiting itself, not only the elevated tiers.**
+Until it is set, the limiter cannot identify callers and keys its counters off
+whichever proxy address terminated the request. That address varies between
+requests, so counters fragment and the public limit is not reliably enforced.
+The function logs a warning once per instance while in this state.
+
 An elevated limit is granted on the strength of an IP address, so the
 deployment has to be able to identify the caller's IP with confidence.
 `X-Forwarded-For` is append-only — anything a caller sends arrives as a prefix

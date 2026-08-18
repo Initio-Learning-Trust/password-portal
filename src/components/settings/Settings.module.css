@@ -443,6 +443,38 @@
   margin-top: 1.25rem;
 }
 
+.codeWrap {
+  position: relative;
+}
+
+.codeWrap + .codeWrap {
+  margin-top: 0.5rem;
+}
+
+.copyBtn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  padding: 0.25rem 0.625rem;
+  border: 1px solid rgba(226, 232, 240, 0.3);
+  border-radius: var(--radius-sm);
+  background: rgba(226, 232, 240, 0.12);
+  color: #e2e8f0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.copyBtn:hover {
+  background: rgba(226, 232, 240, 0.24);
+}
+
+.copyBtn:focus-visible {
+  outline: 2px solid var(--color-aqua);
+  outline-offset: 2px;
+}
+
 .codeBlock {
   display: block;
   padding: 1rem;
@@ -452,7 +484,8 @@
   font-family: 'SF Mono', 'Menlo', monospace;
   font-size: 0.8125rem;
   white-space: pre-wrap;
-  word-break: break-all;
+  word-break: break-word;
+  padding-right: 4.5rem;
   line-height: 1.5;
   overflow-x: auto;
 }

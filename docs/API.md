@@ -40,6 +40,19 @@ CloudBlaze69
 CastleValley95
 ```
 
+### PowerShell
+
+In PowerShell, `curl` is an alias for `Invoke-WebRequest`, which returns a
+response object and prints all of its properties rather than just the body. The
+passwords are in its `Content` property. To get the text directly:
+
+```powershell
+Invoke-RestMethod "https://password.initiolearning.org/api/password/simple?n=3"
+
+# or call the real curl binary
+curl.exe "https://password.initiolearning.org/api/password/simple?n=3"
+```
+
 `format=json` returns:
 
 ```

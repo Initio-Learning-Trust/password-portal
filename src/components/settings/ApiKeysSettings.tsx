@@ -171,67 +171,14 @@ export function ApiKeysSettings() {
           </div>
         )}
 
-        {/* API Documentation */}
+        {/* Full reference lives in the API Docs tab. Kept as a pointer rather
+            than a second copy, so the two cannot drift apart. */}
         <div className={styles.apiDocs}>
-          <h4>API Documentation</h4>
+          <h4>Using the API</h4>
           <p className={styles.helpText}>
-            Use the API to programmatically create password links from external systems.
+            Endpoints, parameters, rate limits and copy-ready examples are in the{' '}
+            <strong>API Docs</strong> tab.
           </p>
-
-          <div className={styles.apiSection}>
-            <h5>Endpoint</h5>
-            <code className={styles.codeBlock}>
-              POST https://europe-west2-password-portal-a7053.cloudfunctions.net/api
-            </code>
-          </div>
-
-          <div className={styles.apiSection}>
-            <h5>Headers</h5>
-            <code className={styles.codeBlock}>
-              {`Content-Type: application/json
-X-API-Key: your-api-key-here`}
-            </code>
-          </div>
-
-          <div className={styles.apiSection}>
-            <h5>Request Body</h5>
-            <code className={styles.codeBlock}>
-              {`{
-  "recipientEmail": "user@example.com",
-  "recipientName": "John Smith",
-  "password": "SecurePassword123",
-  "notes": "Optional internal notes",
-  "sendEmail": false
-}`}
-            </code>
-          </div>
-
-          <div className={styles.apiSection}>
-            <h5>Example (cURL)</h5>
-            <code className={styles.codeBlock}>
-              {`curl -X POST \\
-  https://europe-west2-password-portal-a7053.cloudfunctions.net/api \\
-  -H "Content-Type: application/json" \\
-  -H "X-API-Key: your-api-key-here" \\
-  -d '{
-    "recipientEmail": "user@example.com",
-    "recipientName": "John Smith",
-    "password": "SecurePassword123"
-  }'`}
-            </code>
-          </div>
-
-          <div className={styles.apiSection}>
-            <h5>Response</h5>
-            <code className={styles.codeBlock}>
-              {`{
-  "success": true,
-  "id": "uuid-of-password-link",
-  "link": "https://password.initiolearning.org/p/uuid",
-  "status": "pending"
-}`}
-            </code>
-          </div>
         </div>
 
         {/* Keys list */}
