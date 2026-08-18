@@ -1,0 +1,9 @@
+{
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+  },
+  "containerEnv": {
+    "CLAUDE_CONFIG_DIR": "/home/codespace/.claude"
+  }
+}
