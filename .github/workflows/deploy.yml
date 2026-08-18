@@ -57,6 +57,56 @@ jobs:
         run: node test-ip-matching.js
         working-directory: functions
 
+      # Reports whether the deploy secrets are configured, without failing.
+      # Merging to main is otherwise the first moment anyone finds out, and
+      # the answer arrives as a failed production deploy. Informational here
+      # because pull requests opened from a fork never receive secrets; the
+      # deploy job enforces the same list for real.
+      - name: Report deployment secret status
+        env:
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
+          FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          ALLOWED_DOMAIN: ${{ secrets.ALLOWED_DOMAIN }}
+          APP_URL: ${{ secrets.APP_URL }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          missing=""
+          for name in FIREBASE_API_KEY FIREBASE_AUTH_DOMAIN FIREBASE_PROJECT_ID \
+                      FIREBASE_STORAGE_BUCKET FIREBASE_MESSAGING_SENDER_ID \
+                      FIREBASE_APP_ID ALLOWED_DOMAIN APP_URL \
+                      FIREBASE_SERVICE_ACCOUNT; do
+            if [ -z "${!name}" ]; then
+              missing="$missing $name"
+              echo "  missing  $name"
+            else
+              echo "  set      $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::Not set:$missing — a merge to main would fail at the deploy guard."
+          else
+            echo "All nine secrets are set. A merge to main will deploy."
+          fi
+
+      # The bundle only carries Firebase config if the secrets reached the
+      # build. Reported here so a mapping mistake surfaces on the pull request
+      # rather than as a broken production site.
+      - name: Report whether the bundle carries Firebase config
+        env:
+          EXPECTED_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+        run: |
+          if [ -z "$EXPECTED_API_KEY" ]; then
+            echo "::warning::FIREBASE_API_KEY is not set, cannot check the bundle."
+          elif grep -rqF "$EXPECTED_API_KEY" dist/assets; then
+            echo "Bundle contains the injected Firebase API key."
+          else
+            echo "::warning::Bundle does not contain the Firebase API key — the deploy guard would stop a merge."
+          fi
+
   deploy:
     needs: build
     runs-on: ubuntu-latest
