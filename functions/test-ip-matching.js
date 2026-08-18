@@ -131,5 +131,50 @@ check('whitespace tolerated', [r.ip, r.trusted], ['203.0.113.7', true]);
 r = resolveClient(req('garbage, 10.0.0.9'), CONFIG);
 check('unparseable client entry dropped from chain', r.ip, '10.0.0.9');
 
+// --- The deployed configuration ------------------------------------------
+// Chain shapes observed against the live deployment via GET /api/whoami:
+// requests through Firebase Hosting arrive as [client, google-frontend], where
+// the trailing hop rotates across several Google ranges between requests.
+const GOOGLE_PROXIES = require('./trusted-proxies.json');
+const PROD = { hops: 1, trustedProxies: parseCidrList(GOOGLE_PROXIES.join(',')) };
+
+// Real trailing hops sampled from production; every one must be recognised, or
+// the caller silently drops back to the public limit.
+const REAL_HOPS = [
+  '66.249.93.230', '66.102.8.231', '66.102.8.101', '192.178.11.99',
+  '66.102.8.97', '74.125.210.32', '192.178.11.135', '66.102.8.204',
+  '66.102.8.72', '66.102.8.64', '192.178.11.4', '66.102.8.3', '74.125.210.133',
+];
+
+console.log('\nDeployed proxy configuration');
+const SERVER = '185.115.123.66';
+let allResolved = true;
+for (const hop of REAL_HOPS) {
+  const r = resolveClient(req(`${SERVER}, ${hop}`), PROD);
+  if (r.ip !== SERVER || !r.trusted) {
+    allResolved = false;
+    console.log(`  FAIL  hop ${hop} -> ip=${r.ip} trusted=${r.trusted} (${r.reason})`);
+  }
+}
+check('every sampled Google hop resolves the real client', allResolved, true);
+
+// Same client, different front ends, must share one rate-limit bucket. Getting
+// this wrong is what made counters fragment and left the limit unenforced.
+const keys = new Set(REAL_HOPS.map((hop) => resolveClient(req(`${SERVER}, ${hop}`), PROD).key));
+check('one client shares a single bucket across front ends', keys.size, 1);
+
+// Forgery must still fail under the deployed settings.
+let r2 = resolveClient(req(`203.0.113.7, ${SERVER}, 66.102.8.231`), PROD);
+check('prefixed forgery resolves the real caller', [r2.ip, r2.trusted], [SERVER, true]);
+
+r2 = resolveClient(req(`${SERVER}, 203.0.113.7`), PROD);
+check('non-Google trailing hop is refused', r2.trusted, false);
+
+r2 = resolveClient(req(SERVER), PROD);
+check('single-entry chain is refused', r2.trusted, false);
+
+r2 = resolveClient(req('198.51.100.9, 66.102.8.231'), PROD);
+check('a different client gets a different bucket', r2.key !== resolveClient(req(`${SERVER}, 66.102.8.231`), PROD).key, true);
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

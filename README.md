@@ -196,13 +196,33 @@ the two grants are independent.
 
 Changes take up to 5 minutes to reach live traffic (in-process cache).
 
-### Enabling elevated tiers (required once, before the above works)
+### Proxy trust (already configured)
+
+`RATE_LIMIT_PROXY_HOPS=1` and `RATE_LIMIT_TRUSTED_PROXIES` are set in
+`functions/.env`, measured against the live deployment. Requests arriving
+through Firebase Hosting show a two-entry chain, `[client, google-frontend]`,
+so the client is one hop from the right.
+
+The trailing hop rotates across several Google ranges between requests, so
+`RATE_LIMIT_TRUSTED_PROXIES` holds Google's full published IPv4 and IPv6 list
+from <https://www.gstatic.com/ipranges/goog.json> rather than a few observed
+addresses. `functions/trusted-proxies.json` is the same list, used by the tests.
+
+Refresh both if elevated tiers start intermittently falling back to the public
+limit — that is the symptom of a front-end range that is not on the list. The
+failure is safe (a caller drops to the public limit, never gains one they
+should not have), but it is silent.
+
+The procedure below is what produced those values, kept for when the routing
+changes.
+
+### Re-measuring the proxy chain
 
 **This configuration gates rate limiting itself, not only the elevated tiers.**
-Until it is set, the limiter cannot identify callers and keys its counters off
+Without it the limiter cannot identify callers and keys its counters off
 whichever proxy address terminated the request. That address varies between
 requests, so counters fragment and the public limit is not reliably enforced.
-The function logs a warning once per instance while in this state.
+The function logs a warning once per instance while in that state.
 
 An elevated limit is granted on the strength of an IP address, so the
 deployment has to be able to identify the caller's IP with confidence.
