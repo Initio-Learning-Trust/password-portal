@@ -5,6 +5,7 @@ import { Layout } from '../components/layout/Layout';
 import { Card } from '../components/common/Card';
 import { ErrorBoundary } from '../components/common/ErrorBoundary';
 import { ApiKeysSettings } from '../components/settings/ApiKeysSettings';
+import { ApiDocsSettings } from '../components/settings/ApiDocsSettings';
 import { IpWhitelistSettings } from '../components/settings/IpWhitelistSettings';
 import { WordListsSettings } from '../components/settings/WordListsSettings';
 import { UsersSettings } from '../components/settings/UsersSettings';
@@ -12,7 +13,7 @@ import { EmailTemplatesSettings } from '../components/settings/EmailTemplatesSet
 import { AuditLogSettings } from '../components/settings/AuditLogSettings';
 import styles from './SettingsPage.module.css';
 
-type SettingsTab = 'api-keys' | 'ip-whitelist' | 'word-lists' | 'users' | 'email-templates' | 'audit-log';
+type SettingsTab = 'api-docs' | 'api-keys' | 'ip-whitelist' | 'word-lists' | 'users' | 'email-templates' | 'audit-log';
 
 export function SettingsPage() {
   const isAdmin = useIsAdmin();
@@ -32,6 +33,7 @@ export function SettingsPage() {
   }
 
   const tabs: { id: SettingsTab; label: string }[] = [
+    { id: 'api-docs', label: 'API Docs' },
     { id: 'api-keys', label: 'API Keys' },
     { id: 'ip-whitelist', label: 'IP Whitelist' },
     { id: 'word-lists', label: 'Word Lists' },
@@ -69,6 +71,11 @@ export function SettingsPage() {
                 exit={{ opacity: 0, y: -4 }}
                 transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
               >
+                {activeTab === 'api-docs' && (
+                  <ErrorBoundary>
+                    <ApiDocsSettings />
+                  </ErrorBoundary>
+                )}
                 {activeTab === 'api-keys' && (
                   <ErrorBoundary>
                     <ApiKeysSettings />
