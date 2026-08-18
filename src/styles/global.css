@@ -198,3 +198,73 @@ input, textarea, select {
     font-size: 14px;
   }
 }
+
+/* ==========================================================================
+   Printing a single documentation section
+   --------------------------------------------------------------------------
+   `printSection()` in ApiDocsSettings marks one subtree with
+   [data-print-target] and sets [data-printing] on the body. Everything else is
+   hidden so the generation reference and the link-creation reference can be
+   handed to different people separately.
+
+   Uses visibility rather than display so the target keeps its layout, then
+   pulls it to the top of the page — hiding ancestors with display:none would
+   take the target down with them.
+   ========================================================================== */
+
+[data-print-only] {
+  display: none;
+}
+
+@media print {
+  /* Anything meaningless on paper: copy buttons, print buttons, nav. */
+  [data-no-print] {
+    display: none !important;
+  }
+
+  [data-print-only] {
+    display: block;
+  }
+
+  body[data-printing] * {
+    visibility: hidden;
+  }
+
+  body[data-printing] [data-print-target],
+  body[data-printing] [data-print-target] * {
+    visibility: visible;
+  }
+
+  body[data-printing] [data-print-target] {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 0;
+    margin: 0;
+  }
+
+  /* Browsers drop background colours by default, so the dark code blocks would
+     print as near-invisible light-grey text. Invert them for paper. */
+  body[data-printing] [data-print-target] code {
+    background: #ffffff !important;
+    color: #000000 !important;
+    border: 1px solid #999999;
+  }
+
+  /* Keep examples and their headings from splitting across pages. */
+  body[data-printing] [data-print-target] h5,
+  body[data-printing] [data-print-target] table {
+    break-inside: avoid;
+  }
+
+  body[data-printing] [data-print-target] code {
+    break-inside: avoid;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  @page {
+    margin: 15mm;
+  }
+}
