@@ -169,9 +169,10 @@ Summary:
 
 ### Rate limits
 
-Generation endpoints are public and rate limited per IP. Configuration is via
-function parameters (set with `firebase functions:config` / `.env` files in
-`functions/`):
+Generation endpoints are public and rate limited per IP. Configuration lives in
+`functions/.env`, which is committed — these are non-secret values, and CI must
+deploy the same ones a local deploy would. Edit the file and redeploy functions
+for a change to take effect.
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -288,16 +289,48 @@ RATE_LIMIT_TRUSTED_PROXIES   # Unset. See "Operating the API"
 
 ### Deployment
 
-```bash
-# Build frontend
-npm run build
+Pushes to `main` build and deploy automatically via
+`.github/workflows/deploy.yml`, which deploys hosting, functions and Firestore
+rules in one invocation. Pull requests run the build and type checks only.
 
-# Build functions
+The workflow refuses to deploy if any required repository secret is unset, and
+again if the built bundle does not contain the injected Firebase API key. Both
+checks exist because an earlier version of this workflow shipped bundles with
+empty config that crashed in production with `auth/invalid-api-key`.
+
+Required repository secrets (Settings → Secrets and variables → Actions):
+
+```
+FIREBASE_API_KEY              FIREBASE_MESSAGING_SENDER_ID
+FIREBASE_AUTH_DOMAIN          FIREBASE_APP_ID
+FIREBASE_PROJECT_ID           ALLOWED_DOMAIN
+FIREBASE_STORAGE_BUCKET       APP_URL
+FIREBASE_SERVICE_ACCOUNT      # JSON service account key
+```
+
+Cloud Functions secrets (`PASSWORD_ENCRYPTION_KEY`, `SMTP_USER`, `SMTP_PASS`)
+live in Secret Manager and are set with `firebase functions:secrets:set`, not
+as GitHub secrets.
+
+Non-secret function parameters live in `functions/.env`, which is committed via
+an explicit `.gitignore` negation. That is deliberate: CI deploys from a clean
+checkout, so an uncommitted parameter file would mean CI silently deploying
+different values than a local deploy — including leaving `RATE_LIMIT_PROXY_HOPS`
+unset, which disables elevated rate limits without any error. Never put a
+secret in that file.
+
+To deploy by hand:
+
+```bash
+npm run build                            # needs VITE_FIREBASE_* in the environment
 cd functions && npm run build && cd ..
 
-# Deploy
-firebase deploy
+firebase deploy --only hosting,functions,firestore:rules
 ```
+
+Deploy the three targets together. Hosting alone can leave the site calling an
+API that has not shipped; functions alone can leave them running against stale
+security rules. Add `firestore:indexes` if `firestore.indexes.json` changed.
 
 ---
 

@@ -21,6 +21,12 @@ functions/lib
 .env.*.local
 *.local
 
+# Cloud Functions parameters are non-secret configuration (URLs, ports, rate
+# limits) and must be committed, or a CI deploy ships different values than a
+# local one. Real secrets go to Secret Manager via
+# `firebase functions:secrets:set`, never in this file.
+!functions/.env
+
 # Service account keys / credentials (never commit)
 *-firebase-adminsdk-*.json
 password-portal-*.json
