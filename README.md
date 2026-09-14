@@ -120,10 +120,10 @@ every configured list is merged unless a specific one is named. The in-app
 generator picks up an edit as soon as it is saved; the API caches the lists for
 up to five minutes.
 
-The in-app generator has no built-in fallback list — with no lists configured
-it reports that none are set up rather than generating from words nobody chose.
-The API still falls back to a built-in list so that public generation keeps
-working.
+There is no built-in fallback list on either side. With no lists configured the
+app says so instead of generating, and the API returns `503`; generating from a
+vocabulary nobody chose is how a list edit ends up looking like it did nothing.
+At least one word list must exist for password generation to work.
 
 #### Email Templates
 Customize notification emails:

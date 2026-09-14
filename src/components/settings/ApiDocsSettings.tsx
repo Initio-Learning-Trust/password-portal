@@ -272,6 +272,7 @@ curl.exe "${BASE}/password/simple?n=3"`}</CodeBlock>
                   <tr><td><code>403</code></td><td>Source IP not allowlisted</td></tr>
                   <tr><td><code>404</code></td><td>Unknown endpoint, style, or word list</td></tr>
                   <tr><td><code>429</code></td><td>Rate limit exceeded</td></tr>
+                  <tr><td><code>503</code></td><td>No word lists configured, or they could not be read</td></tr>
                 </tbody>
               </table>
               <p className={styles.helpText}>

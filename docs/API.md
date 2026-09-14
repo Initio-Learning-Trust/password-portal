@@ -157,6 +157,7 @@ CIDR range your requests originate from.
 | `405` | Method not allowed |
 | `429` | Rate limit exceeded |
 | `500` | Server error |
+| `503` | No word lists are configured, or they could not be read |
 
 Errors are JSON: `{"error":"..."}`.
 
@@ -165,7 +166,11 @@ Errors are JSON: `{"error":"..."}`.
 ## Notes
 
 - Passwords are drawn from word lists curated by administrators, so output is
-  predictable in shape and safe to hand to pupils.
+  predictable in shape and safe to hand to pupils. There is no built-in
+  fallback list: at least one list must be configured, or generation returns
+  `503`. Edits reach the API within five minutes.
+- With no `list` parameter, every configured list is merged into one
+  vocabulary; naming a list restricts generation to that list alone.
 - Randomness comes from a cryptographically secure generator.
 - The service does not store generated passwords. Nothing is recorded against a
   generation request beyond rate-limit counters, which hold a hashed IP.
