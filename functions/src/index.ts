@@ -13,7 +13,12 @@ import { resolveClient, type ProxyConfig, type ResolvedClient } from './utils/cl
 import { bucketKey, consume, rateLimitHeaders } from './utils/rateLimit';
 import { checkApiAccess, findEntry } from './utils/allowlist';
 import { generateMany, isPasswordMode, PASSWORD_MODES, type PasswordMode } from './utils/passwordGenerator';
-import { hasWord, listNames, resolveWords } from './utils/wordLists';
+import {
+  hasWord,
+  listNames,
+  resolveWords,
+  WordListsUnavailableError,
+} from './utils/wordLists';
 
 // Initialize Firebase Admin
 admin.initializeApp();
@@ -716,7 +721,17 @@ async function handleGeneratePasswords(
     return;
   }
 
-  const passwords = generateMany(count, { mode, words: selection.words });
+  // No built-in fallback list: with nothing configured there is nothing to
+  // generate from, and saying so beats inventing a vocabulary.
+  if (selection.words.length === 0) {
+    res.status(503).json({
+      error: 'No word lists are configured',
+      detail: 'Add a word list in Settings > Word Lists before generating passwords.',
+    });
+    return;
+  }
+
+  const passwords = generateMany(count, selection.words, mode);
 
   // Generated credentials must never be cached by a proxy or the browser.
   res.set('Cache-Control', 'no-store');
@@ -915,6 +930,14 @@ export const api = onRequest(
 
       res.status(405).json({ error: 'Method not allowed' });
     } catch (error) {
+      if (error instanceof WordListsUnavailableError) {
+        // Already logged with its cause where the read failed.
+        console.error(`Word lists unavailable on ${req.method} ${path}`);
+        if (!res.headersSent) {
+          res.status(503).json({ error: 'Word lists are temporarily unavailable' });
+        }
+        return;
+      }
       console.error(`Unhandled error on ${req.method} ${path}:`, error);
       if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
     }

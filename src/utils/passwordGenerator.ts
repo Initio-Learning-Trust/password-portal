@@ -1,19 +1,12 @@
-// Password generator using custom word lists
+// Password generator using the word lists configured in Settings.
 // Simple: TreeBridge47 (Word + Word + 2 digits)
 // Secure: Movie3Cartoon)Bottle (Word + digit + Word + symbol + Word)
 // Word4: Tiger4829 (Word + 4 digits)
-
-// Default word lists
-const defaultWords = [
-  'Tree', 'Bridge', 'Cloud', 'River', 'Stone', 'Light', 'Storm', 'Flame',
-  'Tiger', 'Eagle', 'Falcon', 'Phoenix', 'Dragon', 'Lion', 'Wolf', 'Bear',
-  'Swift', 'Bright', 'Golden', 'Silver', 'Crystal', 'Sunny', 'Ocean', 'Forest',
-  'Mountain', 'Thunder', 'Sunset', 'Autumn', 'Spring', 'Summer', 'Winter', 'Cosmic',
-  'Movie', 'Cartoon', 'Bottle', 'Planet', 'Garden', 'Castle', 'Arrow', 'Shield',
-  'Rocket', 'Meadow', 'Breeze', 'Frost', 'Comet', 'Blaze', 'Valley', 'Grove',
-  'Hawk', 'Dolphin', 'Panther', 'Jaguar', 'Cobra', 'Raven', 'Owl', 'Fox',
-  'Brave', 'Calm', 'Cool', 'Warm', 'Fresh', 'Strong', 'Quick', 'Smart'
-];
+//
+// The word list is always supplied by the caller — there is no built-in list
+// and no default. Callers load the configured lists with `useWordLists()` and
+// must not call it before the words have loaded; an empty list throws rather
+// than quietly producing a password from somewhere else.
 
 const symbols = ['!', '@', '#', '$', '%', '&', '*', ')', '+', '='];
 
@@ -23,11 +16,6 @@ export interface GeneratedPassword {
   id: string;
   password: string;
   mode: PasswordMode;
-}
-
-export interface GeneratorOptions {
-  words?: string[];
-  mode?: PasswordMode;
 }
 
 // Cryptographically secure random integer in [0, max) with rejection sampling
@@ -107,32 +95,46 @@ function getGenerator(mode: PasswordMode): (words: string[]) => string {
   }
 }
 
-// Generate a password based on mode
-export function generatePassword(options: GeneratorOptions = {}): string {
-  const { words = defaultWords, mode = 'simple' } = options;
+// Guard the one precondition the generator has. Callers gate on
+// `words.length > 0` in the UI, so this only fires on a genuine bug.
+function assertWords(words: string[]): void {
+  if (!words || words.length === 0) {
+    throw new Error('generatePassword: no words configured');
+  }
+}
+
+// Generate a password from `words` in the given mode.
+export function generatePassword(
+  words: string[],
+  mode: PasswordMode = 'simple'
+): string {
+  assertWords(words);
 
   return getGenerator(mode)(words);
 }
 
 // Generate multiple password options for user to choose from
 export function generatePasswordOptions(
+  words: string[],
   count: number = 3,
-  options: GeneratorOptions = {}
+  mode: PasswordMode = 'simple'
 ): string[] {
   const passwords: string[] = [];
   for (let i = 0; i < count; i++) {
-    passwords.push(generatePassword(options));
+    passwords.push(generatePassword(words, mode));
   }
   return passwords;
 }
 
 // Generate a batch of passwords efficiently
-// Optimized for 500+ passwords by resolving options once
+// Optimized for 500+ passwords by resolving the generator once
 export function generateBatch(
   count: number,
-  options: GeneratorOptions = {}
+  words: string[],
+  mode: PasswordMode = 'simple'
 ): GeneratedPassword[] {
-  const { words = defaultWords, mode = 'simple' } = options;
+  assertWords(words);
+
   const generator = getGenerator(mode);
   const results: GeneratedPassword[] = new Array(count);
 
@@ -156,24 +158,4 @@ export function validatePassword(password: string): {
     return { valid: false, message: 'Password must be at least 8 characters' };
   }
   return { valid: true };
-}
-
-// Get word list from Firestore word lists
-export function buildGeneratorOptions(
-  wordLists: { name: string; words: string[] }[],
-  selectedList?: string,
-  mode?: PasswordMode
-): GeneratorOptions {
-  const options: GeneratorOptions = { mode };
-
-  if (!selectedList || wordLists.length === 0) {
-    return options; // Use defaults
-  }
-
-  const list = wordLists.find((l) => l.name === selectedList);
-  if (list) {
-    options.words = list.words;
-  }
-
-  return options;
 }

@@ -197,7 +197,10 @@ River"
           <SkeletonCard count={3} />
         ) : loading ? null : wordLists.length === 0 && !showAddForm ? (
           <div className={styles.empty}>
-            <p>No custom word lists. Using default words for password generation.</p>
+            <p>
+              No word lists yet. Passwords are generated from the words in these
+              lists, so add one to start generating.
+            </p>
           </div>
         ) : (
           <div className={styles.wordListsGrid}>

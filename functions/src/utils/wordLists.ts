@@ -4,9 +4,12 @@
 // the collection per request would put a Firestore read in the hot path for
 // data that changes a few times a year. The cache is per instance and expires
 // on a timer; edits in Settings take up to CACHE_TTL_MS to reach live traffic.
+//
+// There is no built-in fallback list. Passwords come from the lists configured
+// in Settings or the request fails saying so — generating from a vocabulary
+// nobody chose is how a list edit ends up looking like it did nothing.
 
 import * as admin from 'firebase-admin';
-import { defaultWords } from './passwordGenerator';
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -17,8 +20,20 @@ interface WordListCache {
 
 let cache: WordListCache | null = null;
 
+/**
+ * Thrown when the lists could not be read and there is no cached copy to serve
+ * instead. Callers turn this into a 503 rather than generating without them.
+ */
+export class WordListsUnavailableError extends Error {
+  constructor() {
+    super('Word lists could not be read');
+    this.name = 'WordListsUnavailableError';
+  }
+}
+
 async function load(db: admin.firestore.Firestore): Promise<WordListCache> {
-  if (cache && Date.now() - cache.loadedAt < CACHE_TTL_MS) return cache;
+  const cached = cache;
+  if (cached && Date.now() - cached.loadedAt < CACHE_TTL_MS) return cached;
 
   try {
     const snapshot = await db.collection('word_lists').get();
@@ -31,20 +46,23 @@ async function load(db: admin.firestore.Firestore): Promise<WordListCache> {
         return { name: String(data.name || doc.id), words };
       })
       .filter((list) => list.words.length > 0);
-    cache = { lists, loadedAt: Date.now() };
+    const fresh = { lists, loadedAt: Date.now() };
+    cache = fresh;
+    return fresh;
   } catch (error) {
-    console.error('Failed to load word lists, using defaults:', error);
-    // Serve a stale cache if we have one; otherwise fall back to defaults so
-    // generation keeps working through a Firestore blip.
-    cache = cache ?? { lists: [], loadedAt: Date.now() };
+    console.error('Failed to load word lists:', error);
+    // Serve a stale cache through a Firestore blip — expired words beat no
+    // words. With nothing cached the request fails instead, and the failure is
+    // deliberately not cached so the next request retries rather than
+    // inheriting a five-minute outage from one bad read.
+    if (cached) return cached;
+    throw new WordListsUnavailableError();
   }
-
-  return cache;
 }
 
 export interface WordListSelection {
   words: string[];
-  /** The list actually used, or null when the built-in defaults were used. */
+  /** The list actually used, or null when every configured list was merged. */
   listName: string | null;
   /** True when a specific list was requested but does not exist. */
   notFound: boolean;
@@ -54,6 +72,9 @@ export interface WordListSelection {
  * Resolve the word list for a request. With no `requested` name, every
  * configured list is merged so the API draws on the full vocabulary; with a
  * name, only that list is used.
+ *
+ * Returns an empty `words` when no lists are configured. Callers must check
+ * for that and report it — there is nothing to fall back to.
  */
 export async function resolveWords(
   db: admin.firestore.Firestore,
@@ -64,12 +85,8 @@ export async function resolveWords(
   if (requested) {
     const wanted = requested.trim().toLowerCase();
     const match = lists.find((list) => list.name.toLowerCase() === wanted);
-    if (!match) return { words: defaultWords, listName: null, notFound: true };
+    if (!match) return { words: [], listName: null, notFound: true };
     return { words: match.words, listName: match.name, notFound: false };
-  }
-
-  if (lists.length === 0) {
-    return { words: defaultWords, listName: null, notFound: false };
   }
 
   const merged = Array.from(new Set(lists.flatMap((list) => list.words)));
@@ -87,6 +104,7 @@ export async function hasWord(db: admin.firestore.Firestore, word: string): Prom
   const { lists } = await load(db);
   const needle = word.trim().toLowerCase();
   if (!needle) return false;
-  const pool = lists.length > 0 ? lists.flatMap((list) => list.words) : defaultWords;
-  return pool.some((candidate) => candidate.toLowerCase() === needle);
+  return lists.some((list) =>
+    list.words.some((candidate) => candidate.toLowerCase() === needle)
+  );
 }

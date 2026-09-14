@@ -5,16 +5,21 @@ import { Card, CardContent } from '../components/common/Card';
 import { Button } from '../components/common/Button';
 import { PasswordList } from '../components/common/PasswordList';
 import { generatePassword, type PasswordMode } from '../utils/passwordGenerator';
+import { useWordLists } from '../hooks/useWordLists';
 import { useToast } from '../components/common/Toast';
 import type { GeneratedPassword } from '../types';
 import styles from './GeneratePasswordsPage.module.css';
 
 let nextId = 0;
 
-function generateBatchPasswords(count: number, mode: PasswordMode): GeneratedPassword[] {
+function generateBatchPasswords(
+  count: number,
+  words: string[],
+  mode: PasswordMode
+): GeneratedPassword[] {
   return Array.from({ length: count }, () => ({
     id: String(++nextId),
-    value: generatePassword({ mode }),
+    value: generatePassword(words, mode),
     copied: false,
   }));
 }
@@ -36,6 +41,10 @@ const SLIDER_MAX = 100;
 
 export function GeneratePasswordsPage() {
   const { showToast } = useToast();
+  // Words come from the lists configured in Settings; there is no built-in
+  // fallback, so every generate path below is gated on `canGenerate`.
+  const { words, loading: wordsLoading, error: wordsError } = useWordLists();
+  const canGenerate = words.length > 0;
   const [count, setCount] = useState(10);
   const [mode, setMode] = useState<PasswordMode>('simple');
   const [passwords, setPasswords] = useState<GeneratedPassword[]>([]);
@@ -43,21 +52,40 @@ export function GeneratePasswordsPage() {
 
   const hasResults = passwords.length > 0;
 
-  // Click-to-generate hero. Seeded on first render so the page always opens
-  // with a usable password rather than an empty placeholder. Generated locally
-  // rather than through the API: a reroll should feel instant, and there is no
-  // reason to spend a network round-trip on something that takes microseconds.
-  const [hero, setHero] = useState(() => generatePassword({ mode: 'simple' }));
+  // Click-to-generate hero. Seeded as soon as the word lists arrive so the
+  // page opens with a usable password; null until then, because there is
+  // nothing to generate from. Generated locally rather than through the API: a
+  // reroll should feel instant, and there is no reason to spend a network
+  // round-trip on something that takes microseconds.
+  const [hero, setHero] = useState<string | null>(null);
   const [heroCopied, setHeroCopied] = useState(false);
   const heroCopyTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => () => window.clearTimeout(heroCopyTimer.current), []);
 
-  const rerollHero = useCallback((nextMode: PasswordMode) => {
-    setHero(generatePassword({ mode: nextMode }));
-    setHeroCopied(false);
-    window.clearTimeout(heroCopyTimer.current);
-  }, []);
+  const rerollHero = useCallback(
+    (nextMode: PasswordMode) => {
+      if (words.length === 0) return;
+      setHero(generatePassword(words, nextMode));
+      setHeroCopied(false);
+      window.clearTimeout(heroCopyTimer.current);
+    },
+    [words]
+  );
+
+  // Seed the hero as soon as words are available. Re-runs if the lists change
+  // under us (an admin saving an edit in another tab), so what is on screen is
+  // always drawn from the current vocabulary.
+  useEffect(() => {
+    if (words.length === 0) {
+      setHero(null);
+      return;
+    }
+    setHero(generatePassword(words, mode));
+    // `mode` is handled by selectMode, which rerolls explicitly; re-seeding on
+    // every mode change here would double-roll the hero.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [words]);
 
   // Style selection is shared: picking a style anywhere on the page updates
   // both the hero and the batch controls, and rerolls the hero so what is on
@@ -71,6 +99,7 @@ export function GeneratePasswordsPage() {
   );
 
   const handleCopyHero = async () => {
+    if (!hero) return;
     try {
       await navigator.clipboard.writeText(hero);
       setHeroCopied(true);
@@ -82,10 +111,11 @@ export function GeneratePasswordsPage() {
   };
 
   const handleGenerate = () => {
+    if (!canGenerate) return;
     setIsGenerating(true);
     // Yield so the button press animation has time to render
     requestAnimationFrame(() => {
-      setPasswords(generateBatchPasswords(count, mode));
+      setPasswords(generateBatchPasswords(count, words, mode));
       setIsGenerating(false);
     });
   };
@@ -119,10 +149,11 @@ export function GeneratePasswordsPage() {
   };
 
   const handleRegenerate = (id: string) => {
+    if (!canGenerate) return;
     setPasswords((prev) =>
       prev.map((p) =>
         p.id === id
-          ? { ...p, value: generatePassword({ mode }), copied: false }
+          ? { ...p, value: generatePassword(words, mode), copied: false }
           : p
       )
     );
@@ -200,6 +231,22 @@ export function GeneratePasswordsPage() {
     }
   };
 
+  // Why the generator is unavailable, or null when it is fine (including while
+  // the lists are still loading — that resolves on its own in a moment).
+  const noWordsMessage = useMemo(() => {
+    if (canGenerate || wordsLoading) return null;
+    if (wordsError) {
+      return {
+        title: 'Could not load the word lists',
+        body: 'Passwords are built from the word lists in Settings, and those could not be read just now. Reload the page to try again.',
+      };
+    }
+    return {
+      title: 'No word lists configured',
+      body: 'Passwords are built from the word lists in Settings. Add a list there and it will be used here straight away.',
+    };
+  }, [canGenerate, wordsLoading, wordsError]);
+
   const sliderFill = useMemo(
     () =>
       `${Math.min(100, ((count - MIN_COUNT) / (SLIDER_MAX - MIN_COUNT)) * 100)}%`,
@@ -225,32 +272,46 @@ export function GeneratePasswordsPage() {
           <Card className={styles.heroCard}>
             <CardContent>
               <div className={styles.hero}>
-                <button
-                  type="button"
-                  className={styles.heroPassword}
-                  onClick={handleCopyHero}
-                  aria-label={`Copy password ${hero}`}
-                >
-                  <AnimatePresence mode="wait" initial={false}>
-                    <motion.span
-                      key={hero}
-                      initial={{ opacity: 0, y: 8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -8 }}
-                      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+                {noWordsMessage ? (
+                  <div className={styles.noWords} role="status">
+                    <h2 className={styles.noWordsTitle}>{noWordsMessage.title}</h2>
+                    <p className={styles.noWordsBody}>{noWordsMessage.body}</p>
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className={styles.heroPassword}
+                      onClick={handleCopyHero}
+                      disabled={!hero}
+                      aria-label={hero ? `Copy password ${hero}` : 'Loading word lists'}
                     >
-                      {hero}
-                    </motion.span>
-                  </AnimatePresence>
-                </button>
+                      <AnimatePresence mode="wait" initial={false}>
+                        <motion.span
+                          key={hero ?? 'loading'}
+                          initial={{ opacity: 0, y: 8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -8 }}
+                          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+                        >
+                          {hero ?? '\u2026'}
+                        </motion.span>
+                      </AnimatePresence>
+                    </button>
 
-                {/* Announces each new password, and the copy confirmation, to
-                    screen readers without stealing focus. */}
-                <p className={styles.heroStatus} aria-live="polite">
-                  {heroCopied ? 'Copied to clipboard' : 'Click the password to copy it'}
-                </p>
+                    {/* Announces each new password, and the copy confirmation, to
+                        screen readers without stealing focus. */}
+                    <p className={styles.heroStatus} aria-live="polite">
+                      {heroCopied ? 'Copied to clipboard' : 'Click the password to copy it'}
+                    </p>
+                  </>
+                )}
 
-                <Button variant="primary" onClick={() => rerollHero(mode)}>
+                <Button
+                  variant="primary"
+                  onClick={() => rerollHero(mode)}
+                  disabled={!canGenerate}
+                >
                   Another password, please
                 </Button>
 
@@ -391,6 +452,7 @@ export function GeneratePasswordsPage() {
                     variant="primary"
                     onClick={handleGenerate}
                     loading={isGenerating}
+                    disabled={!canGenerate}
                   >
                     Generate {count} password{count !== 1 ? 's' : ''}
                   </Button>
