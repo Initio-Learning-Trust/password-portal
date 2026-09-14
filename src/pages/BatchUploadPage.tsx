@@ -7,6 +7,7 @@ import { Layout } from '../components/layout/Layout';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/common/Card';
 import { Button } from '../components/common/Button';
 import { generatePassword } from '../utils/passwordGenerator';
+import { useWordLists } from '../hooks/useWordLists';
 import styles from './BatchUploadPage.module.css';
 
 interface BatchRow {
@@ -45,6 +46,11 @@ export function BatchUploadPage() {
   const [batchId, setBatchId] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string>('');
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
+  // Blank passwords in the CSV are filled from the word lists configured in
+  // Settings. With none configured nothing is auto-filled — those rows are
+  // marked invalid rather than silently given a password from elsewhere.
+  const { words, loading: wordsLoading, error: wordsError } = useWordLists();
+  const canGenerate = words.length > 0;
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -71,7 +77,7 @@ export function BatchUploadPage() {
       const row: BatchRow = {
         email: email || '',
         name: name || '',
-        password: password || generatePassword(),
+        password: password || (canGenerate ? generatePassword(words) : ''),
         notes: notes || '',
         valid: true,
       };
@@ -80,6 +86,11 @@ export function BatchUploadPage() {
       if (!row.email || !row.email.includes('@')) {
         row.valid = false;
         row.error = 'Invalid email';
+      } else if (!row.password) {
+        // Only reachable with no word lists configured — the CSV left the
+        // password blank and there was nothing to generate from.
+        row.valid = false;
+        row.error = 'No password';
       }
 
       parsedRows.push(row);
@@ -89,18 +100,34 @@ export function BatchUploadPage() {
     setStep('preview');
   };
 
+  // Re-validate a row after its password changes, so filling a blank password
+  // clears the "No password" error the parse stage set.
+  const revalidate = (row: BatchRow): BatchRow => {
+    if (!row.email || !row.email.includes('@')) {
+      return { ...row, valid: false, error: 'Invalid email' };
+    }
+    if (!row.password) {
+      return { ...row, valid: false, error: 'No password' };
+    }
+    return { ...row, valid: true, error: undefined };
+  };
+
   const handleGeneratePassword = (index: number) => {
-    const newRows = [...rows];
-    newRows[index].password = generatePassword();
-    setRows(newRows);
+    if (!canGenerate) return;
+    setRows((prev) =>
+      prev.map((row, i) =>
+        i === index ? revalidate({ ...row, password: generatePassword(words) }) : row
+      )
+    );
   };
 
   const handleGenerateAllPasswords = () => {
-    const newRows = rows.map((row) => ({
-      ...row,
-      password: row.password || generatePassword(),
-    }));
-    setRows(newRows);
+    if (!canGenerate) return;
+    setRows((prev) =>
+      prev.map((row) =>
+        revalidate({ ...row, password: row.password || generatePassword(words) })
+      )
+    );
   };
 
   const handleRemoveRow = (index: number) => {
@@ -279,6 +306,13 @@ export function BatchUploadPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
+                {!canGenerate && !wordsLoading && (
+                  <p className={styles.noWords} role="status">
+                    {wordsError
+                      ? 'Passwords are built from the word lists in Settings, which could not be read just now. Rows with a blank password will need one filling in by hand.'
+                      : 'No word lists are configured, so blank passwords cannot be auto-generated. Add a list in Settings, or include a password for every row.'}
+                  </p>
+                )}
                 <div className={styles.uploadArea}>
                   <div className={styles.uploadIcon}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -391,6 +425,7 @@ export function BatchUploadPage() {
                     variant="ghost"
                     size="sm"
                     onClick={handleGenerateAllPasswords}
+                    disabled={!canGenerate}
                   >
                     Generate All Passwords
                   </Button>
@@ -431,6 +466,7 @@ export function BatchUploadPage() {
                                 variant="ghost"
                                 size="sm"
                                 onClick={() => handleGeneratePassword(index)}
+                                disabled={!canGenerate}
                               >
                                 ↻
                               </Button>

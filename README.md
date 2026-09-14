@@ -115,8 +115,15 @@ Customize the password generator:
 2. Add custom word lists (e.g., Animals, Nature, School)
 3. Words are used to generate memorable passwords
 
-These lists feed both the in-app generator and the public generation API. With
-no lists configured, a built-in default list is used.
+These lists feed both the in-app generator and the public generation API, and
+every configured list is merged unless a specific one is named. The in-app
+generator picks up an edit as soon as it is saved; the API caches the lists for
+up to five minutes.
+
+The in-app generator has no built-in fallback list — with no lists configured
+it reports that none are set up rather than generating from words nobody chose.
+The API still falls back to a built-in list so that public generation keeps
+working.
 
 #### Email Templates
 Customize notification emails:

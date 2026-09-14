@@ -6,6 +6,7 @@ import { Card, CardContent } from '../components/common/Card';
 import { Button } from '../components/common/Button';
 import { Input, Textarea } from '../components/common/Input';
 import { generatePassword, type PasswordMode } from '../utils/passwordGenerator';
+import { useWordLists } from '../hooks/useWordLists';
 import type { CreatePasswordForm, PasswordCreationResult } from '../types';
 import styles from './CreatePasswordPage.module.css';
 
@@ -18,17 +19,30 @@ export function CreatePasswordPage() {
     sendNotification: false,
   });
   const [passwordMode, setPasswordMode] = useState<PasswordMode>('simple');
+  // Words come from the lists configured in Settings; there is no built-in
+  // fallback. With none configured the generator is unavailable and the
+  // technician enters a password manually instead.
+  const { words, loading: wordsLoading, error: wordsError } = useWordLists();
+  const canGenerate = words.length > 0;
   const [result, setResult] = useState<PasswordCreationResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<'password' | 'link' | null>(null);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Auto-generate password on mount and when mode changes
+  // Seed a password as soon as the word lists arrive. Only fills an empty
+  // field: picking a style regenerates explicitly via `selectMode`, so a
+  // password the technician typed by hand is never overwritten by a list
+  // edit landing from Settings while the form is open.
   useEffect(() => {
-    const newPassword = generatePassword({ mode: passwordMode });
-    setForm((prev) => ({ ...prev, password: newPassword }));
-  }, [passwordMode]);
+    if (words.length === 0) return;
+    setForm((prev) =>
+      prev.password ? prev : { ...prev, password: generatePassword(words, passwordMode) }
+    );
+    // `passwordMode` is deliberately omitted: style changes go through
+    // `selectMode`, which regenerates on purpose.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [words]);
 
   useEffect(() => {
     return () => {
@@ -37,8 +51,17 @@ export function CreatePasswordPage() {
   }, []);
 
   const handleRegenerate = () => {
-    const newPassword = generatePassword({ mode: passwordMode });
+    if (!canGenerate) return;
+    const newPassword = generatePassword(words, passwordMode);
     setForm({ ...form, password: newPassword });
+  };
+
+  // Picking a style switches mode and rerolls, so the password on screen
+  // always matches the selected style.
+  const selectMode = (next: PasswordMode) => {
+    setPasswordMode(next);
+    if (!canGenerate) return;
+    setForm((prev) => ({ ...prev, password: generatePassword(words, next) }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -79,7 +102,7 @@ export function CreatePasswordPage() {
     setForm({
       recipientEmail: '',
       recipientName: '',
-      password: generatePassword({ mode: passwordMode }),
+      password: canGenerate ? generatePassword(words, passwordMode) : '',
       notes: '',
       sendNotification: false,
     });
@@ -191,7 +214,7 @@ export function CreatePasswordPage() {
                   <button
                     type="button"
                     className={`${styles.modeBtn} ${passwordMode === 'simple' ? styles.active : ''}`}
-                    onClick={() => setPasswordMode('simple')}
+                    onClick={() => selectMode('simple')}
                   >
                     <span className={styles.modeIcon}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -207,7 +230,7 @@ export function CreatePasswordPage() {
                   <button
                     type="button"
                     className={`${styles.modeBtn} ${passwordMode === 'secure' ? styles.active : ''}`}
-                    onClick={() => setPasswordMode('secure')}
+                    onClick={() => selectMode('secure')}
                   >
                     <span className={styles.modeIcon}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -223,7 +246,7 @@ export function CreatePasswordPage() {
                   <button
                     type="button"
                     className={`${styles.modeBtn} ${passwordMode === 'word4' ? styles.active : ''}`}
-                    onClick={() => setPasswordMode('word4')}
+                    onClick={() => selectMode('word4')}
                   >
                     <span className={styles.modeIcon}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -246,6 +269,7 @@ export function CreatePasswordPage() {
                     type="button"
                     className={styles.regenerateBtn}
                     onClick={handleRegenerate}
+                    disabled={!canGenerate}
                     title="Generate new password"
                   >
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -254,6 +278,14 @@ export function CreatePasswordPage() {
                     </svg>
                   </button>
                 </div>
+
+                {!canGenerate && !wordsLoading && (
+                  <p className={styles.noWords} role="status">
+                    {wordsError
+                      ? 'Passwords are built from the word lists in Settings, which could not be read just now. Enter a password below, or reload to try again.'
+                      : 'No word lists are configured, so a password cannot be generated. Add a list in Settings, or enter a password below.'}
+                  </p>
+                )}
 
                 {/* Manual Override */}
                 <details className={styles.manualOverride}>
@@ -301,6 +333,7 @@ export function CreatePasswordPage() {
                   variant="primary"
                   size="lg"
                   loading={loading}
+                  disabled={!form.password}
                 >
                   Create Password Link
                 </Button>

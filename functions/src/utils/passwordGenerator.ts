@@ -1,16 +1,22 @@
 // Password generator — server-side mirror of `src/utils/passwordGenerator.ts`.
 //
-// KEEP IN SYNC with the client copy. The two exist separately because the
-// frontend and functions are separate TypeScript projects with separate
-// tsconfig roots; `src/utils/searchTokens.ts` and its counterpart here are
-// duplicated for the same reason. The formats must match exactly, or a
-// password generated in the browser and one fetched from the API would not be
-// recognisably the same product.
+// KEEP THE FORMATS IN SYNC with the client copy. The two exist separately
+// because the frontend and functions are separate TypeScript projects with
+// separate tsconfig roots; `src/utils/searchTokens.ts` and its counterpart
+// here are duplicated for the same reason. The formats must match exactly, or
+// a password generated in the browser and one fetched from the API would not
+// be recognisably the same product.
 //
-// The only intentional divergence is the randomness source: the browser uses
-// Web Crypto's getRandomValues, this uses Node's crypto.randomBytes. Both are
-// CSPRNGs and both are consumed with the same rejection sampling, so the
-// output distribution is identical.
+// The call signatures deliberately differ. The client takes the words as a
+// required argument and has no default list, so a caller cannot forget to pass
+// the configured words and silently generate from somewhere else. This copy
+// keeps a `defaultWords` fallback because the public API must still return a
+// password when no list is configured.
+//
+// The randomness source differs too: the browser uses Web Crypto's
+// getRandomValues, this uses Node's crypto.randomBytes. Both are CSPRNGs and
+// both are consumed with the same rejection sampling, so the output
+// distribution is identical.
 
 import * as crypto from 'crypto';
 
